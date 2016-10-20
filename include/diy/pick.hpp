@@ -60,9 +60,9 @@ distance(int dim, const Bounds& bounds, const Point& p)
         // diff = max(bounds.min[i] - p[i], 0, p[i] - bounds.max[i])
         float diff = 0, d;
 
-        d = bounds.min[i] - p[i];
+        d = (float)bounds.min[i] - (float)p[i];
         if (d > diff) diff = d;
-        d = p[i] - bounds.max[i];
+        d = (float)p[i] - (float)bounds.max[i];
         if (d > diff) diff = d;
 
         res += diff*diff;
@@ -80,8 +80,8 @@ distance(int dim, const Bounds& bounds1, const Bounds& bounds2)
     {
         float diff = 0, d;
 
-        float d1 = bounds1.max[i] - bounds2.min[i];
-        float d2 = bounds2.max[i] - bounds1.min[i];
+        float d1 = (float)bounds1.max[i] - (float)bounds2.min[i];
+        float d2 = (float)bounds2.max[i] - (float)bounds1.min[i];
 
         if (d1 > 0 && d2 > 0)
             diff = 0;
