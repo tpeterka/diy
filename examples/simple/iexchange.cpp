@@ -91,4 +91,3 @@ int main(int argc, char* argv[])
         console->info("Total iterations: {}", master.block<Block>(master.loaded_block())->count);
     }
 }
-
