@@ -18,6 +18,11 @@
 
 #include "thread.hpp"
 
+// TODO: I just made these up
+#define DIY_MAX_Q_SIZE 8
+#define DIY_MAX_REQUESTS 8
+#define DIY_OUT_QUEUES_LIMIT 8
+
 namespace diy
 {
   // Stores and manages blocks; initiates serialization and communication when necessary.
@@ -55,6 +60,7 @@ namespace diy
     public:
       // Communicator types
       struct Proxy;
+      struct IProxyWithLink;
       struct ProxyWithLink;
 
       struct QueuePolicy
@@ -192,6 +198,11 @@ namespace diy
 
       //! exchange the queues between all the blocks (collective operation)
       inline void   exchange();
+
+      //! nonblocking exchange of the queues between all the blocks
+      template<class Functor>
+      inline void   iexchange(const Functor& f, size_t max_q_size = DIY_MAX_Q_SIZE);
+
       inline void   process_collectives();
 
       inline
@@ -274,7 +285,10 @@ namespace diy
       // debug
       inline void       show_incoming_records() const;
 
-    private:
+      OutgoingQueuesMap& outgoing()                     { return outgoing_; }
+      IncomingQueuesMap& incoming()                     { return incoming_; }
+
+  private:
       std::vector<Link*>    links_;
       Collection            blocks_;
       std::vector<int>      gids_;
@@ -790,6 +804,31 @@ exchange()
 
   flush();
   //fprintf(stdout, "Finished exchange\n");
+}
+
+template<class Functor>
+void
+diy::Master::
+iexchange(const Functor& f, size_t max_q_size)
+{
+    // TODO: separate comm thread?
+
+    bool all_done = false;
+    while (!all_done)
+    {
+        for (size_t i = 0; i < size(); i++)  // for all blocks
+        {
+            // iexchange comm proxy
+            IProxyWithLink icp(IProxyWithLink(Proxy(const_cast<Master*>(this), gid(i)),
+                                              block(i),
+                                              link(i)));
+            all_done = f(block(i), icp);     // TODO: push command and execute (for skip)
+
+            // TODO?
+            // flush(outgoing);
+            // comm_exchange(to_send, out_queues_limit);
+        }
+    }
 }
 
 /* Communicator */

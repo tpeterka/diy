@@ -21,7 +21,7 @@ void    save_block(const void* b,
 void    load_block(void* b,
                    diy::BinaryBuffer& bb)   { diy::load(bb, *static_cast<Block*>(b)); }
 
-bool flip_coin(void* b_, const diy::Master::ProxyWithLink& icp, void*)
+bool foo(void* b_, const diy::Master::IProxyWithLink& icp, void*)
 {
     Block*        b = static_cast<Block*>(b_);
     diy::Link*    l = icp.link();
@@ -30,25 +30,25 @@ bool flip_coin(void* b_, const diy::Master::ProxyWithLink& icp, void*)
     {
         size_t tot_q_size = 0;
         for (size_t i = 0; i < l->size(); ++i)
-            tot_q_size = l->target(i).size();
+        {
+            tot_q_size += icp.incoming(i).size();
+            if (icp.incoming(i).size())
+            {
+                icp.dequeue(icp.link()->target(i).gid, b->count);
+                b->count++;
+                icp.enqueue(icp.link()->target(i), b->count);
+            }
+        }
+
         if (!tot_q_size)
             break;
-
-        dequeue(&b->count);
-        b->count++;
-        enqueue(b->count);
     }
 
-    size_t tot_q_size = 0;
-    for (size_t i = 0; i < l->size(); ++i)
-        tot_q_size = l->target(i).size();
-    if (!tot_q_size)
-        break;
-
+    // flip a coin to decide whether to be done
     int done = rand() % 2;
     //std::cout << cp.gid() << "  " << done << " " << b->count << std::endl;
-    cp.collectives()->clear();
-    cp.all_reduce(done, std::plus<int>());
+    icp.collectives()->clear();
+    icp.all_reduce(done, std::plus<int>());
 
     auto console = spd::get("console");
     console->debug("count={} done={}", b->count, done);
@@ -82,7 +82,8 @@ int main(int argc, char* argv[])
         if (assigner.rank(gid) == world.rank())
             master.add(gid, new Block, new diy::Link);
 
-    master.iexchange(&flip_coin);
+    // dequeue, enqueue, exchange all in one nonblocking routine
+    master.iexchange(foo);
 
     if (world.rank() == 0)
     {
