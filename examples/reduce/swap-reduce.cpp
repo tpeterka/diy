@@ -29,11 +29,10 @@ typedef     AddPointBlock<DIM>          AddBlock;
 //
 // callback function for redistribute operator, called in each round of the reduction
 //
-void redistribute(void* b_,                                 // local block
+void redistribute(Block* b,                                 // local block
                   const diy::ReduceProxy& srp,              // communication proxy
                   const diy::RegularSwapPartners& partners) // partners of the current block
 {
-    Block*        b        = static_cast<Block*>(b_);
     unsigned      round    = srp.round();                   // current round number
 
     // step 1: dequeue
@@ -47,8 +46,8 @@ void redistribute(void* b_,                                 // local block
 
         std::vector<Block::Point>    in_points;
         srp.dequeue(nbr_gid, in_points);
-        fprintf(stderr, "[%d:%d] Received %d points from [%d]\n",
-                srp.gid(), round, (int) in_points.size(), nbr_gid);
+        fmt::print(stderr, "[{}:{}] Received {} points from [{}]\n",
+                   srp.gid(), round, (int) in_points.size(), nbr_gid);
         for (size_t j = 0; j < in_points.size(); ++j)
             b->points.push_back(in_points[j]);
     }
@@ -79,8 +78,8 @@ void redistribute(void* b_,                                 // local block
         else
         {
             srp.enqueue(srp.out_link().target(i), out_points[i]);
-            fprintf(stderr, "[%d] Sent %d points to [%d]\n",
-                    srp.gid(), (int) out_points[i].size(), srp.out_link().target(i).gid);
+            fmt::print(stderr, "[{}] Sent {} points to [{}]\n",
+                       srp.gid(), (int) out_points[i].size(), srp.out_link().target(i).gid);
         }
     }
 
@@ -177,6 +176,6 @@ int main(int argc, char* argv[])
                 &redistribute);                 // swap operator callback function
 
     // callback functions for local block
-    master.foreach(&Block::print_block, &verbose);
+    master.foreach([verbose](Block* b, const diy::Master::ProxyWithLink& cp) { b->print_block(cp, verbose); });
     master.foreach(&Block::verify_block);
 }

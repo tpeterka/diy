@@ -4,6 +4,8 @@
 #include <vector>
 #include "master.hpp"
 #include "assigner.hpp"
+#include "detail/block_traits.hpp"
+#include "log.hpp"
 
 namespace diy
 {
@@ -85,7 +87,7 @@ struct ReduceProxy: public Master::Proxy
 
 namespace detail
 {
-  template<class Reduce, class Partners>
+  template<class Block, class Partners>
   struct ReductionFunctor;
 
   template<class Partners, class Skip>
@@ -110,13 +112,17 @@ void reduce(Master&                    master,        //!< master object
             const Reduce&              reduce,        //!< reduction callback function
             const Skip&                skip)          //!< object determining whether a block should be skipped
 {
+  auto log = get_logger();
+
   int original_expected = master.expected();
+
+  using Block = typename detail::block_traits<Reduce>::type;
 
   unsigned round;
   for (round = 0; round < partners.rounds(); ++round)
   {
-    //fprintf(stderr, "== Round %d\n", round);
-    master.foreach(detail::ReductionFunctor<Reduce,Partners>(round, reduce, partners, assigner),
+    log->debug("Round {}", round);
+    master.foreach(detail::ReductionFunctor<Block,Partners>(round, reduce, partners, assigner),
                    detail::SkipInactiveOr<Partners,Skip>(round, partners, skip));
     master.execute();
 
@@ -135,8 +141,8 @@ void reduce(Master&                    master,        //!< master object
     master.flush();
   }
   // final round
-  //fprintf(stderr, "== Round %d\n", round);
-  master.foreach(detail::ReductionFunctor<Reduce,Partners>(round, reduce, partners, assigner),
+  log->debug("Round {}", round);
+  master.foreach(detail::ReductionFunctor<Block,Partners>(round, reduce, partners, assigner),
                  detail::SkipInactiveOr<Partners,Skip>(round, partners, skip));
 
   master.set_expected(original_expected);
@@ -159,13 +165,15 @@ void reduce(Master&                    master,        //!< master object
 
 namespace detail
 {
-  template<class Reduce, class Partners>
+  template<class Block, class Partners>
   struct ReductionFunctor
   {
-                ReductionFunctor(unsigned round_, const Reduce& reduce_, const Partners& partners_, const Assigner& assigner_):
+    using Callback = std::function<void(Block*, const ReduceProxy&, const Partners&)>;
+
+                ReductionFunctor(unsigned round_, const Callback& reduce_, const Partners& partners_, const Assigner& assigner_):
                     round(round_), reduce(reduce_), partners(partners_), assigner(assigner_)        {}
 
-    void        operator()(void* b, const Master::ProxyWithLink& cp, void*) const
+    void        operator()(Block* b, const Master::ProxyWithLink& cp) const
     {
       if (!partners.active(round, cp.gid(), *cp.master())) return;
 
@@ -186,7 +194,7 @@ namespace detail
     }
 
     unsigned        round;
-    Reduce          reduce;
+    Callback        reduce;
     Partners        partners;
     const Assigner& assigner;
   };

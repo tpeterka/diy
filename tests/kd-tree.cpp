@@ -93,45 +93,39 @@ struct Block
                   Block()                                  {}
 };
 
-struct WrapDomain
+void print_block(Block* b, const diy::Master::ProxyWithLink& cp, bool verbose)
 {
-  bool          wrap;
-  const Bounds& domain;
-};
-
-void print_block(void* b_, const diy::Master::ProxyWithLink& cp, void* verbose_)
-{
-  Block*   b         = static_cast<Block*>(b_);
-  bool     verbose   = *static_cast<bool*>(verbose_);
   RCLink*  link      = static_cast<RCLink*>(cp.link());
 
-  fprintf(stdout, "%d: [%f,%f,%f] - [%f,%f,%f] (%d neighbors): %lu points\n",
-                  cp.gid(),
-                  link->bounds().min[0], link->bounds().min[1], link->bounds().min[2],
-                  link->bounds().max[0], link->bounds().max[1], link->bounds().max[2],
-                  link->size(), b->points.size());
+  fmt::print("{}: [{},{},{}] - [{},{},{}] ({} neighbors): {} points\n",
+             cp.gid(),
+             link->bounds().min[0], link->bounds().min[1], link->bounds().min[2],
+             link->bounds().max[0], link->bounds().max[1], link->bounds().max[2],
+             link->size(), b->points.size());
 
   for (int i = 0; i < link->size(); ++i)
   {
-      fprintf(stdout, "  (%d,%d,(%d,%d,%d)):",
-                      link->target(i).gid, link->target(i).proc,
-                      link->direction(i)[0],
-                      link->direction(i)[1],
-                      link->direction(i)[2]);
+      fmt::print("  ({},{},({},{},{})):",
+                 link->target(i).gid, link->target(i).proc,
+                 link->direction(i)[0],
+                 link->direction(i)[1],
+                 link->direction(i)[2]);
       const Bounds& bounds = link->bounds(i);
-      fprintf(stdout, " [%f,%f,%f] - [%f,%f,%f]\n",
-              bounds.min[0], bounds.min[1], bounds.min[2],
-              bounds.max[0], bounds.max[1], bounds.max[2]);
+      fmt::print(" [{},{},{}] - [{},{},{}]\n",
+                 bounds.min[0], bounds.min[1], bounds.min[2],
+                 bounds.max[0], bounds.max[1], bounds.max[2]);
   }
 
   if (verbose)
     for (size_t i = 0; i < b->points.size(); ++i)
-      fprintf(stdout, "  %f %f %f\n", b->points[i][0], b->points[i][1], b->points[i][2]);
+      fmt::print("  {} {} {}\n", b->points[i][0], b->points[i][1], b->points[i][2]);
 }
 
+namespace diy
+{
 inline
 bool
-operator==(const diy::ContinuousBounds& x, const diy::ContinuousBounds& y)
+operator==(const ContinuousBounds& x, const ContinuousBounds& y)
 {
     for (unsigned i = 0; i < DIM; ++i)
     {
@@ -145,9 +139,10 @@ operator==(const diy::ContinuousBounds& x, const diy::ContinuousBounds& y)
 
 inline
 bool
-operator!=(const diy::ContinuousBounds& x, const diy::ContinuousBounds& y)
+operator!=(const ContinuousBounds& x, const ContinuousBounds& y)
 {
     return !(x == y);
+}
 }
 
 bool intersects(const Bounds& x, const Bounds& y, int dim, bool wrap, const Bounds& domain)
@@ -162,13 +157,9 @@ bool intersects(const Bounds& x, const Bounds& y, int dim, bool wrap, const Boun
     return x.min[dim] <= y.max[dim] && y.min[dim] <= x.max[dim];
 }
 
-void verify_block(void* b_, const diy::Master::ProxyWithLink& cp, void* wrap_domain)
+void verify_block(Block* b, const diy::Master::ProxyWithLink& cp, bool wrap, const Bounds& domain)
 {
-  Block*   b    = static_cast<Block*>(b_);
   RCLink*  link = static_cast<RCLink*>(cp.link());
-
-  bool          wrap    = static_cast<WrapDomain*>(wrap_domain)->wrap;
-  const Bounds& domain  = static_cast<WrapDomain*>(wrap_domain)->domain;
 
   for (size_t i = 0; i < b->points.size(); ++i)
     for (unsigned j = 0; j < DIM; ++j)
@@ -346,11 +337,13 @@ TEST_CASE_METHOD(KDTreeFixture, "k-d tree is built", "[kdtree]")
     diy::kdtree(master, assigner, DIM, domain, &Block::points, 2*hist, wrap);
 
   // debugging
-  master.foreach(&print_block, &verbose);
+  auto v = verbose;
+  master.foreach([v](Block* b, const diy::Master::ProxyWithLink& cp) { print_block(b,cp,v); });
   diy::all_to_all(master, assigner, &exchange_bounds);
-  WrapDomain wrap_domain = { wrap, domain };
   master.set_threads(1);        // catch.hpp isn't thread-safe
-  master.foreach(&verify_block, &wrap_domain);
+  auto w = wrap;
+  auto d = domain;
+  master.foreach([w,d](Block* b, const diy::Master::ProxyWithLink& cp) { verify_block(b,cp,w,d); });
   if (world.rank() == 0)
     std::cout << "Blocks verified" << std::endl;
 }

@@ -23,10 +23,8 @@ struct Redistribute
        Redistribute(const Decomposer& decomposer_):
            decomposer(decomposer_)              {}
 
-  void operator()(void* b_, const diy::ReduceProxy& rp) const
+  void operator()(Block* b, const diy::ReduceProxy& rp) const
   {
-      Block* b = static_cast<Block*>(b_);
-
       if (rp.in_link().size() == 0)
       {
           // queue points to the correct blocks
@@ -47,11 +45,11 @@ struct Redistribute
             for (int j = 0; j < DIM; ++j)
               if (b->points[i][j] < bounds.min[j] || b->points[i][j] > bounds.max[j])
               {
-                fprintf(stderr, "!!! Point sent outside the target box !!!\n");
-                fprintf(stderr, "    %f %f %f\n", b->points[i][0], b->points[i][1], b->points[i][2]);
-                fprintf(stderr, "    %f %f %f - %f %f %f\n",
-                                bounds.min[0], bounds.min[1], bounds.min[2],
-                                bounds.max[0], bounds.max[1], bounds.max[2]);
+                  fmt::print(stderr, "!!! Point sent outside the target box !!!\n");
+                  fmt::print(stderr, "    {} {} {}\n", b->points[i][0], b->points[i][1], b->points[i][2]);
+                  fmt::print(stderr, "    {} {} {} - {} {} {}\n",
+                                          bounds.min[0], bounds.min[1], bounds.min[2],
+                                          bounds.max[0], bounds.max[1], bounds.max[2]);
               }
 #endif
           }
@@ -103,6 +101,7 @@ int main(int argc, char* argv[])
   int                       threads     = -1;
   int                       k           = 2;
   std::string               prefix      = "./DIY.XXXXXX";
+  std::string               log_level   = "info";
 
   Bounds domain;
   domain.min[0] = domain.min[1] = domain.min[2] = 0;
@@ -118,6 +117,7 @@ int main(int argc, char* argv[])
       >> Option('t', "thread",  threads,        "number of threads")
       >> Option('m', "memory",  mem_blocks,     "number of blocks to keep in memory")
       >> Option(     "prefix",  prefix,         "prefix for external storage")
+      >> Option('l', "log",     log_level,      "log level")
   ;
 
   ops
@@ -137,6 +137,8 @@ int main(int argc, char* argv[])
       }
       return 1;
   }
+
+  diy::create_logger(log_level);
 
   diy::FileStorage          storage(prefix);
   diy::Master               master(world,
@@ -158,6 +160,6 @@ int main(int argc, char* argv[])
   decomposer.decompose(world.rank(), assigner, create);
   diy::all_to_all(master, assigner, Redistribute(decomposer), k);
 
-  master.foreach(&Block::print_block, &verbose);
+  master.foreach([verbose](Block* b, const diy::Master::ProxyWithLink& cp) { b->print_block(cp, verbose); });
   master.foreach(&Block::verify_block);
 }

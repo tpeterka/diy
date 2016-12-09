@@ -6,6 +6,7 @@
 #include <list>
 #include <deque>
 #include <algorithm>
+#include <functional>
 
 #include "link.hpp"
 #include "collection.hpp"
@@ -22,6 +23,11 @@
 #define DIY_MAX_Q_SIZE 8
 #define DIY_MAX_REQUESTS 8
 #define DIY_OUT_QUEUES_LIMIT 8
+
+#include "detail/block_traits.hpp"
+
+#include "log.hpp"
+
 
 namespace diy
 {
@@ -42,12 +48,14 @@ namespace diy
       // Commands
       struct BaseCommand;
 
-      template<class Block, class Functor, class Skip>
+      template<class Block>
       struct Command;
 
       typedef std::vector<BaseCommand*>     Commands;
 
       // Skip
+      using Skip = std::function<bool(int, const Master&)>;
+
       struct SkipNoIncoming;
       struct NeverSkip { bool    operator()(int i, const Master& master) const   { return false; } };
 
@@ -62,6 +70,10 @@ namespace diy
       struct Proxy;
       struct IProxyWithLink;
       struct ProxyWithLink;
+
+      // foreach callback
+      template<class Block>
+      using Callback = std::function<void(Block*, const ProxyWithLink&)>;
 
       struct QueuePolicy
       {
@@ -80,18 +92,28 @@ namespace diy
         size_t  size;
       };
 
-      struct InFlight
+      struct InFlightSend
       {
-        MemoryBuffer        message;
-        mpi::request        request;
+        std::shared_ptr<MemoryBuffer> message;
+        mpi::request                  request;
 
         // for debug purposes:
         int from, to;
       };
-      struct Collective;
-      struct tags       { enum { queue }; };
 
-      typedef           std::list<InFlight>                 InFlightList;
+      struct InFlightRecv
+      {
+        InFlightRecv() : from(-1), to(-1) {}
+
+        MemoryBuffer message;
+        int from, to;
+      };
+
+      struct Collective;
+      struct tags       { enum { queue, piece }; };
+
+      typedef           std::list<InFlightSend>             InFlightSendsList;
+      typedef           std::map<int, InFlightRecv>         InFlightRecvsMap;
       typedef           std::list<int>                      ToSendList;         // [gid]
       typedef           std::list<Collective>               CollectivesList;
       typedef           std::map<int, CollectivesList>      CollectivesMap;     // gid          -> [collectives]
@@ -150,7 +172,6 @@ namespace diy
                       storage_(storage),
                       // Communicator functionality
                       comm_(comm),
-                      inflight_size_(0),
                       expected_(0),
                       received_(0),
                       immediate_(true)
@@ -225,33 +246,15 @@ namespace diy
       SaveBlock     saver() const                       { return blocks_.saver(); }
 
       //! call `f` with every block
-      template<class Functor>
-      void          foreach(const Functor& f)           { foreach<void>(f); }
-
-      template<class Block, class Functor>
-      void          foreach(const Functor& f)           { foreach<Block>(f, (void*) 0); }
-
-      template<class Functor, class T>
-      void          foreach(const Functor& f, T* aux)   { foreach<void>(f, aux); }
-
-      template<class Block, class Functor, class T>
-      void          foreach(const Functor& f, T* aux)   { foreach<Block>(f, NeverSkip(), aux); }
-
-      template<class Functor, class Skip>
-      void          foreach(const Functor& f, const Skip& skip, void* aux = 0)  { foreach<void>(f,skip,aux); }
-
-      template<class Block, class Functor, class Skip>
-      void          foreach(const Functor& f, const Skip& skip, void* aux = 0);
-
-      // calls to member functions
       template<class Block>
-      void          foreach(void (Block::*f)(const ProxyWithLink&, void*))                   { foreach<Block>(f, (void*) 0); }
+      void          foreach_(const Callback<Block>& f, const Skip& s = NeverSkip());
 
-      template<class Block, class T>
-      void          foreach(void (Block::*f)(const ProxyWithLink&, void*), T* aux)           { foreach<Block>(f, NeverSkip(), aux); }
-
-      template<class Block, class Skip>
-      void          foreach(void (Block::*f)(const ProxyWithLink&, void*), const Skip& skip, void* aux = 0) { foreach<Block>(Binder<Block>(f), skip, aux); }
+      template<class F>
+      void          foreach(const F& f, const Skip& s = NeverSkip())
+      {
+          using Block = typename detail::block_traits<F>::type;
+          foreach_<Block>(f, s);
+      }
 
       inline void   execute();
 
@@ -305,8 +308,8 @@ namespace diy
       mpi::communicator     comm_;
       IncomingQueuesMap     incoming_;
       OutgoingQueuesMap     outgoing_;
-      InFlightList          inflight_;
-      size_t                inflight_size_;
+      InFlightSendsList     inflight_sends_;
+      InFlightRecvsMap      inflight_recvs_;
       CollectivesMap        collectives_;
       int                   expected_;
       int                   received_;
@@ -315,6 +318,9 @@ namespace diy
 
     private:
       fast_mutex            add_mutex_;
+
+    public:
+      std::shared_ptr<spd::logger>  log = get_logger();
   };
 
   struct Master::BaseCommand
@@ -324,27 +330,17 @@ namespace diy
       virtual bool  skip(int i, const Master& master) const                         =0;
   };
 
-  template<class Block, class Functor, class Skip>
+  template<class Block>
   struct Master::Command: public BaseCommand
   {
-            Command(const Functor& f_, const Skip& s_, void* aux_):
-                f(f_), s(s_), aux(aux_)                                             {}
+            Command(Callback<Block> f_, const Skip& s_):
+                f(f_), s(s_)                                                        {}
 
-      void  execute(void* b, const ProxyWithLink& cp) const                         { f(static_cast<Block*>(b), cp, aux); }
-      bool  skip(int i, const Master& m) const                                      { return s(i,m); }
+      void  execute(void* b, const ProxyWithLink& cp) const override                { f(static_cast<Block*>(b), cp); }
+      bool  skip(int i, const Master& m) const override                             { return s(i,m); }
 
-      Functor f;
-      Skip    s;
-      void*   aux;
-  };
-
-  template<class Block>
-  struct Master::Binder
-  {
-    typedef     void (Block::*MemberFn)(const ProxyWithLink&, void*);
-                Binder(MemberFn f): f_(f)                                           {}
-    void        operator()(Block* b, const ProxyWithLink& cp, void* aux) const      { if (b) (b->*f_)(cp, aux); }
-    MemberFn    f_;
+      Callback<Block>   f;
+      Skip              s;
   };
 
   struct Master::SkipNoIncoming
@@ -392,7 +388,7 @@ struct diy::Master::ProcessBlock
 
   void    process()
   {
-    //fprintf(stderr, "Processing with thread: %d\n",  (int) this_thread::get_id());
+    master.log->debug("Processing with thread: {}",  this_thread::get_id());
 
     std::vector<int>      local;
     do
@@ -410,7 +406,7 @@ struct diy::Master::ProcessBlock
           local.push_back(i);
       }
 
-      //fprintf(stderr, "Processing block: %d\n", master.gid(i));
+      master.log->debug("Processing block: {}", master.gid(i));
 
       bool skip_block = true;
       for (size_t cmd = 0; cmd < master.commands_.size(); ++cmd)
@@ -490,7 +486,7 @@ void
 diy::Master::
 unload(int i)
 {
-  //fprintf(stdout, "Unloading block: %d\n", gid(i));
+  log->debug("Unloading block: {}", gid(i));
 
   blocks_.unload(i);
   unload_queues(i);
@@ -514,7 +510,7 @@ unload_incoming(int gid)
     QueueRecord& qr = it->second;
     if (queue_policy_->unload_incoming(*this, it->first, gid, qr.size))
     {
-        //fprintf(stderr, "Unloading queue: %d <- %d\n", gid, it->first);
+        log->debug("Unloading queue: {} <- {}", gid, it->first);
         qr.external = storage_->put(in_qrs.queues[it->first]);
     }
   }
@@ -540,7 +536,7 @@ unload_outgoing(int gid)
   }
   if (queue_policy_->unload_outgoing(*this, gid, out_queues_size - sizeof(size_t)))
   {
-      //fprintf(stderr, "Unloading outgoing queues: %d -> ...; size = %lu\n", gid, out_queues_size);
+      log->debug("Unloading outgoing queues: {} -> ...; size = {}\n", gid, out_queues_size);
       MemoryBuffer  bb;     bb.reserve(out_queues_size);
       diy::save(bb, count);
 
@@ -579,7 +575,7 @@ void
 diy::Master::
 load(int i)
 {
-  //fprintf(stdout, "Loading block: %d\n", gid(i));
+ log->debug("Loading block: {}", gid(i));
 
   blocks_.load(i);
   load_queues(i);
@@ -603,7 +599,7 @@ load_incoming(int gid)
     QueueRecord& qr = it->second;
     if (qr.external != -1)
     {
-        //fprintf(stderr, "Loading queue: %d <- %d\n", gid, it->first);
+        log->debug("Loading queue: {} <- {}", gid, it->first);
         storage_->get(qr.external, in_qrs.queues[it->first]);
         qr.external = -1;
     }
@@ -684,12 +680,12 @@ has_incoming(int i) const
   return false;
 }
 
-template<class Block, class Functor, class Skip>
+template<class Block>
 void
 diy::Master::
-foreach(const Functor& f, const Skip& skip, void* aux)
+foreach_(const Callback<Block>& f, const Skip& skip)
 {
-    commands_.push_back(new Command<Block, Functor, Skip>(f, skip, aux));
+    commands_.push_back(new Command<Block>(f, skip));
 
     if (immediate())
         execute();
@@ -699,7 +695,7 @@ void
 diy::Master::
 execute()
 {
-  //fprintf(stderr, "Entered execute()\n");
+  log->debug("Entered execute()");
   //show_incoming_records();
 
   // touch the outgoing and incoming queues as well as collectives to make sure they exist
@@ -770,10 +766,7 @@ execute()
   incoming_.clear();
 
   if (limit() != -1 && in_memory() > limit())
-  {
-    fprintf(stderr, "Fatal: %d blocks in memory, with limit %d\n", in_memory(), limit());
-    std::abort();
-  }
+      throw std::runtime_error(fmt::format("Fatal: {} blocks in memory, with limit {}", in_memory(), limit()));
 
   // clear commands
   for (size_t i = 0; i < commands_.size(); ++i)
@@ -787,7 +780,7 @@ exchange()
 {
   execute();
 
-  //fprintf(stdout, "Starting exchange\n");
+  log->debug("Starting exchange");
 
   // make sure there is a queue for each neighbor
   for (int i = 0; i < (int)size(); ++i)
@@ -803,8 +796,40 @@ exchange()
   }
 
   flush();
-  //fprintf(stdout, "Finished exchange\n");
+  log->debug("Finished exchange");
 }
+
+namespace diy
+{
+namespace detail
+{
+  template <typename T>
+  struct VectorWindow
+  {
+    T *begin;
+    size_t count;
+  };
+} // namespace detail
+
+namespace mpi
+{
+namespace detail
+{
+  template<typename T>  struct is_mpi_datatype< diy::detail::VectorWindow<T> > { typedef true_type type; };
+
+  template <typename T>
+  struct mpi_datatype< diy::detail::VectorWindow<T> >
+  {
+    typedef diy::detail::VectorWindow<T> VecWin;
+    static MPI_Datatype         datatype()                { return get_mpi_datatype<T>(); }
+    static const void*          address(const VecWin& x)  { return x.begin; }
+    static void*                address(VecWin& x)        { return x.begin; }
+    static int                  count(const VecWin& x)    { return static_cast<int>(x.count); }
+  };
+}
+} // namespace mpi::detail
+
+} // namespace diy
 
 template<class Functor>
 void
@@ -836,8 +861,10 @@ void
 diy::Master::
 comm_exchange(ToSendList& to_send, int out_queues_limit)
 {
+  static const size_t MAX_MPI_MESSAGE_COUNT = INT_MAX;
+
   // isend outgoing queues, up to the out_queues_limit
-  while(inflight_size_ < (size_t)out_queues_limit && !to_send.empty())
+  while(inflight_sends_.size() < (size_t)out_queues_limit && !to_send.empty())
   {
     int from = to_send.front();
 
@@ -846,8 +873,7 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
     {
       int to = it->first.gid;
 
-      //fprintf(stderr, "Processing local queue: %d <- %d\n", to, from);
-      //fprintf(stderr, "   size:    %lu\n",     it->second.size);
+      log->debug("Processing local queue: {} <- {} of size {}", to, from, it->second.size);
 
       QueueRecord& in_qr  = incoming_[to].records[from];
       bool in_external  = block(lid(to)) == 0;
@@ -880,19 +906,18 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
       int     to      = to_proc.gid;
       int     proc    = to_proc.proc;
 
-      //fprintf(stderr, "Processing queue: %d <- %d\n", to, from);
-      //fprintf(stderr, "   size:    %lu\n",     outgoing_[from].queues[to_proc].size());
+    log->debug("Processing queue:      {} <- {} of size {}", to, from, outgoing_[from].queues[to_proc].size());
 
       // There may be local outgoing queues that remained in memory
       if (proc == comm_.rank())     // sending to ourselves: simply swap buffers
       {
-        //fprintf(stderr, "Moving queue in-place: %d <- %d\n", to, from);
+        log->debug("Moving queue in-place: {} <- {}", to, from);
 
         QueueRecord& in_qr  = incoming_[to].records[from];
         bool in_external  = block(lid(to)) == 0;
         if (in_external)
         {
-          //fprintf(stderr, "Unloading outgoing directly as incoming: %d <- %d\n", to, from);
+          log->debug("Unloading outgoing directly as incoming: {} <- {}", to, from);
           MemoryBuffer& bb = it->second;
           in_qr.size = bb.size();
           if (queue_policy_->unload_incoming(*this, from, to, in_qr.size))
@@ -906,7 +931,7 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
           }
         } else        // !in_external
         {
-          //fprintf(stderr, "Swapping in memory: %d <- %d\n", to, from);
+          log->debug("Swapping in memory:    {} <- {}", to, from);
           MemoryBuffer& bb = incoming_[to].queues[from];
           bb.swap(it->second);
           bb.reset();
@@ -918,13 +943,53 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
         continue;
       }
 
-      inflight_.push_back(InFlight()); ++inflight_size_;
-      inflight_.back().from = from;
-      inflight_.back().to   = to;
-      MemoryBuffer& bb = inflight_.back().message;
-      bb.swap(it->second);
-      diy::save(bb, std::make_pair(from, to));
-      inflight_.back().request = comm_.isend(proc, tags::queue, bb.buffer);
+      std::shared_ptr<MemoryBuffer> buffer = std::make_shared<MemoryBuffer>();
+      buffer->swap(it->second);
+
+      std::pair<int, int> tail = std::make_pair(from, to);
+      if (buffer->size() <= (MAX_MPI_MESSAGE_COUNT - sizeof(tail)))
+      {
+        diy::save(*buffer, tail);
+
+        inflight_sends_.emplace_back();
+        inflight_sends_.back().from = from;
+        inflight_sends_.back().to   = to;
+        inflight_sends_.back().request = comm_.isend(proc, tags::queue, buffer->buffer);
+        inflight_sends_.back().message = buffer;
+      }
+      else
+      {
+        int npieces = static_cast<int>((buffer->size() + MAX_MPI_MESSAGE_COUNT - 1)/MAX_MPI_MESSAGE_COUNT);
+
+        // first send the head
+        std::shared_ptr<MemoryBuffer> hb = std::make_shared<MemoryBuffer>();
+        diy::save(*hb, buffer->size());
+        diy::save(*hb, from);
+        diy::save(*hb, to);
+
+        inflight_sends_.emplace_back();
+        inflight_sends_.back().from = from;
+        inflight_sends_.back().to   = to;
+        inflight_sends_.back().request = comm_.isend(proc, tags::piece, hb->buffer);
+        inflight_sends_.back().message = hb;
+
+        // send the message pieces
+        size_t msg_buff_idx = 0;
+        for (int i = 0; i < npieces; ++i, msg_buff_idx += MAX_MPI_MESSAGE_COUNT)
+        {
+          int tag = (i == (npieces - 1)) ? tags::queue : tags::piece;
+
+          detail::VectorWindow<char> window;
+          window.begin = &buffer->buffer[msg_buff_idx];
+          window.count = std::min(MAX_MPI_MESSAGE_COUNT, buffer->size() - msg_buff_idx);
+
+          inflight_sends_.emplace_back();
+          inflight_sends_.back().from = from;
+          inflight_sends_.back().to   = to;
+          inflight_sends_.back().request = comm_.isend(proc, tag, window);
+          inflight_sends_.back().message = buffer;
+        }
+      }
     }
   }
 
@@ -932,35 +997,71 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
   while(nudge());
 
   // check incoming queues
-  mpi::optional<mpi::status>        ostatus = comm_.iprobe(mpi::any_source, tags::queue);
+  mpi::optional<mpi::status> ostatus = comm_.iprobe(mpi::any_source, mpi::any_tag);
   while(ostatus)
   {
-    MemoryBuffer bb;
-    comm_.recv(ostatus->source(), tags::queue, bb.buffer);
+    InFlightRecv &ir = inflight_recvs_[ostatus->source()];
+    int &from = ir.from, &to = ir.to;
 
-    std::pair<int,int> from_to;
-    diy::load_back(bb, from_to);
-    int from = from_to.first;
-    int to   = from_to.second;
-
-    int size     = bb.size();
-    int external = -1;
-
-    incoming_[to].queues[from] = MemoryBuffer();
-    if (block(lid(to)) != 0 || !queue_policy_->unload_incoming(*this, from, to, size))
+    if (from == -1) // uninitialized
     {
-        incoming_[to].queues[from].swap(bb);
-        incoming_[to].queues[from].reset();     // buffer position = 0
-    } else if (queue_policy_->unload_incoming(*this, from, to, size))
-    {
-        //fprintf(stderr, "Directly unloading queue %d <- %d\n", to, from);
-        external = storage_->put(bb);           // unload directly
+      MemoryBuffer bb;
+      comm_.recv(ostatus->source(), ostatus->tag(), bb.buffer);
+
+      if (ostatus->tag() == tags::piece)
+      {
+        size_t msg_size;
+        diy::load(bb, msg_size);
+        diy::load(bb, from);
+        diy::load(bb, to);
+
+        ir.message.buffer.reserve(msg_size);
+      }
+      else // tags::queue
+      {
+        std::pair<int,int> tail;
+        diy::load_back(bb, tail);
+
+        from = tail.first;
+        to   = tail.second;
+        ir.message.swap(bb);
+      }
     }
-    incoming_[to].records[from] = QueueRecord(size, external);
+    else
+    {
+      size_t start_idx = ir.message.buffer.size();
+      size_t count = ostatus->count<char>();
+      ir.message.buffer.resize(start_idx + count);
 
-    ++received_;
+      detail::VectorWindow<char> window;
+      window.begin = &ir.message.buffer[start_idx];
+      window.count = count;
 
-    ostatus = comm_.iprobe(mpi::any_source, tags::queue);
+      comm_.recv(ostatus->source(), ostatus->tag(), window);
+    }
+
+    if (ostatus->tag() == tags::queue)
+    {
+      size_t size  = ir.message.size();
+      int external = -1;
+
+      if (block(lid(to)) != 0 || !queue_policy_->unload_incoming(*this, from, to, size))
+      {
+        incoming_[to].queues[from].swap(ir.message);
+        incoming_[to].queues[from].reset();     // buffer position = 0
+      }
+      else if (queue_policy_->unload_incoming(*this, from, to, size))
+      {
+        log->debug("Directly unloading queue {} <- {}", to, from);
+        external = storage_->put(ir.message); // unload directly
+      }
+      incoming_[to].records[from] = QueueRecord(size, external);
+
+      ++received_;
+      ir = InFlightRecv(); // reset
+    }
+
+    ostatus = comm_.iprobe(mpi::any_source, mpi::any_tag);
   }
 }
 
@@ -983,7 +1084,7 @@ flush()
     else
         to_send.push_back(it->first);
   }
-  //fprintf(stderr, "to_send.size(): %lu\n", to_send.size());
+  log->debug("to_send.size(): {}", to_send.size());
 
   // XXX: we probably want a cleverer limit than block limit times average number of queues per block
   // XXX: with queues we could easily maintain a specific space limit
@@ -1001,16 +1102,16 @@ flush()
     time_type cur = get_time();
     if (cur - start > wait*1000)
     {
-        fprintf(stderr, "Waiting in flush [%d]: %lu - %d out of %d\n",
-                        comm_.rank(), inflight_size_, received_, expected_);
+        log->notice("Waiting in flush [{}]: {} - {} out of {}",
+                    comm_.rank(), inflight_sends_.size(), received_, expected_);
         wait *= 2;
     }
 #endif
-  } while (!inflight_.empty() || received_ < expected_ || !to_send.empty());
+  } while (!inflight_sends_.empty() || received_ < expected_ || !to_send.empty());
 
   outgoing_.clear();
 
-  //fprintf(stderr, "Done in flush\n");
+  log->debug("Done in flush");
   //show_incoming_records();
 
   process_collectives();
@@ -1060,15 +1161,15 @@ diy::Master::
 nudge()
 {
   bool success = false;
-  for (InFlightList::iterator it = inflight_.begin(); it != inflight_.end(); ++it)
+  for (InFlightSendsList::iterator it = inflight_sends_.begin(); it != inflight_sends_.end(); ++it)
   {
     mpi::optional<mpi::status> ostatus = it->request.test();
     if (ostatus)
     {
       success = true;
-      InFlightList::iterator rm = it;
+      InFlightSendsList::iterator rm = it;
       --it;
-      inflight_.erase(rm); --inflight_size_;
+      inflight_sends_.erase(rm);
     }
   }
   return success;
@@ -1084,16 +1185,16 @@ show_incoming_records() const
     for (InQueueRecords::const_iterator cur = in_qrs.records.begin(); cur != in_qrs.records.end(); ++cur)
     {
       const QueueRecord& qr = cur->second;
-      fprintf(stderr, "%d <- %d: (size,external) = (%lu,%d)\n",
-                      it->first, cur->first,
-                      qr.size,
-                      qr.external);
+      log->info("{} <- {}: (size,external) = ({},{})",
+                it->first, cur->first,
+                qr.size,
+                qr.external);
     }
     for (IncomingQueues::const_iterator cur = in_qrs.queues.begin(); cur != in_qrs.queues.end(); ++cur)
     {
-      fprintf(stderr, "%d <- %d: queue.size() = %lu\n",
-                      it->first, cur->first,
-                      const_cast<IncomingQueuesRecords&>(in_qrs).queues[cur->first].size());
+      log->info("{} <- {}: queue.size() = {}",
+                it->first, cur->first,
+                const_cast<IncomingQueuesRecords&>(in_qrs).queues[cur->first].size());
       }
   }
 }

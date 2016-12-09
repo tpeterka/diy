@@ -9,6 +9,7 @@ add_executable              (kd-tree-test           kd-tree.cpp)
 target_link_libraries       (kd-tree-test           ${libraries})
 
 add_executable              (decomposer-test        decomposer.cpp)
+target_link_libraries       (decomposer-test        ${libraries})
 
 add_executable              (swap-reduce-test       swap-reduce.cpp)
 target_link_libraries       (swap-reduce-test       ${libraries})
@@ -16,8 +17,8 @@ target_link_libraries       (swap-reduce-test       ${libraries})
 add_executable              (io-test                io.cpp)
 target_link_libraries       (io-test                ${libraries})
 
-add_executable              (io-bov-order-test      io-bov-order.cpp)
-target_link_libraries       (io-bov-order-test      ${libraries})
+add_executable              (simple-test            simple.cpp)
+target_link_libraries       (simple-test            ${libraries})
 
 add_test                    (kd-tree-test                       scripts/kd-tree.sh)
 add_test                    (kd-tree-test-sampling              scripts/kd-tree.sh -s)
@@ -30,3 +31,5 @@ add_test                    (io-bov-order-test                  io-bov-order-tes
 
 add_test                    (swap-reduce-test                   scripts/swap-reduce.sh)
 add_test                    (swap-reduce-test-k4                scripts/swap-reduce.sh -k 4)
+
+add_test                    (simple-test                        scripts/simple.sh ${MPIEXEC})

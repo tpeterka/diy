@@ -188,11 +188,10 @@ struct AddBlock
 // root block of the group receives data from other blocks in the group and reduces the data
 // nonroot blocks send data to the root
 //
-void sum(void* b_,                                  // local block
+void sum(Block* b,                                  // local block
          const diy::ReduceProxy& rp,                // communication proxy
          const diy::RegularMergePartners& partners) // partners of the current block
 {
-    Block*     b        = static_cast<Block*>(b_);
     unsigned   round    = rp.round();               // current round number
 
     // step 1: dequeue and merge
@@ -201,14 +200,14 @@ void sum(void* b_,                                  // local block
         int nbr_gid = rp.in_link().target(i).gid;
         if (nbr_gid == rp.gid())
         {
-            fprintf(stderr, "[%d:%d] Skipping receiving from self\n", rp.gid(), round);
+            fmt::print(stderr, "[{}:{}] Skipping receiving from self\n", rp.gid(), round);
             continue;
         }
 
         std::vector<int>    in_vals;
         rp.dequeue(nbr_gid, in_vals);
-        fprintf(stderr, "[%d:%d] Received %d values from [%d]\n",
-                rp.gid(), round, (int)in_vals.size(), nbr_gid);
+        fmt::print(stderr, "[{}:{}] Received {} values from [{}]\n",
+                   rp.gid(), round, (int)in_vals.size(), nbr_gid);
         for (size_t j = 0; j < in_vals.size(); ++j)
             (b->data)[j] += in_vals[j];
     }
@@ -220,10 +219,10 @@ void sum(void* b_,                                  // local block
         if (rp.out_link().target(i).gid != rp.gid())
         {
             rp.enqueue(rp.out_link().target(i), b->data);
-            fprintf(stderr, "[%d:%d] Sent %d valuess to [%d]\n",
-                    rp.gid(), round, (int)b->data.size(), rp.out_link().target(i).gid);
+            fmt::print(stderr, "[{}:{}] Sent {} valuess to [{}]\n",
+                       rp.gid(), round, (int)b->data.size(), rp.out_link().target(i).gid);
         } else
-            fprintf(stderr, "[%d:%d] Skipping sending to self\n", rp.gid(), round);
+            fmt::print(stderr, "[{}:{}] Skipping sending to self\n", rp.gid(), round);
 
     }
 }
@@ -231,24 +230,21 @@ void sum(void* b_,                                  // local block
 //
 // prints the block values
 //
-void print_block(void* b_,                             // local block
+void print_block(Block* b,                             // local block
                  const diy::Master::ProxyWithLink& cp, // communication proxy
-                 void* verbose_)                       // user-defined additional arguments
+                 bool verbose)                         // user-defined additional arguments
 {
-    Block*   b       = static_cast<Block*>(b_);
-    bool     verbose = *static_cast<bool*>(verbose_);
-
-    fprintf(stderr, "[%d] Bounds: %f %f %f -- %f %f %f\n",
-            cp.gid(),
-            b->bounds.min[0], b->bounds.min[1], b->bounds.min[2],
-            b->bounds.max[0], b->bounds.max[1], b->bounds.max[2]);
+    fmt::print(stderr, "[{}] Bounds: {} {} {} -- {} {} {}\n",
+               cp.gid(),
+               b->bounds.min[0], b->bounds.min[1], b->bounds.min[2],
+               b->bounds.max[0], b->bounds.max[1], b->bounds.max[2]);
 
     if (verbose && cp.gid() == 0)
     {
-        fprintf(stderr, "[%d] %lu vals: ", cp.gid(), b->data.size());
+        fmt::print(stderr, "[{}] {} vals: ", cp.gid(), b->data.size());
         for (size_t i = 0; i < b->data.size(); ++i)
-            fprintf(stderr, "%d  ", b->data[i]);
-        fprintf(stderr, "\n");
+            fmt::print(stderr, "{}  ", b->data[i]);
+        fmt::print(stderr, "\n");
     }
 }
 
@@ -348,5 +344,6 @@ int main(int argc, char* argv[])
                 partners,                            // RegularMergePartners object
                 &sum);                               // merge operator callback function
 
-    master.foreach(&print_block, &verbose);  // callback function for each local block
+    master.foreach([verbose](Block* b, const diy::Master::ProxyWithLink& cp)
+                   { print_block(b, cp, verbose); });  // callback function for each local block
 }

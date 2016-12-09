@@ -17,10 +17,8 @@
 typedef     diy::Link                   Link;
 typedef     Block<Value>                ValueBlock;
 
-void set_min_max(ValueBlock* b, const diy::Master::Proxy& cp, void* aux)
+void set_min_max(ValueBlock* b, const diy::Master::Proxy& cp, int nblocks)
 {
-    int nblocks = *static_cast<int*>(aux);
-
     if (cp.gid() == 0)
         b->min = -std::numeric_limits<Value>::max();
     else
@@ -122,7 +120,7 @@ int main(int argc, char* argv[])
     if (nblocks % world.size() != 0)
     {
       if (world.rank() == 0)
-        std::cerr << "Number of blocks must be divisible by the number of processes (for collective MPI-IO)\n";
+          fmt::print(stderr, "Number of blocks must be divisible by the number of processes (for collective MPI-IO)\n");
       return 1;
     }
 
@@ -137,7 +135,7 @@ int main(int argc, char* argv[])
     if (sz % (chunk_size * nblocks) != 0)
     {
       if (world.rank() == 0)
-        std::cerr << "Expected data size to align with the number of blocks and chunk size\n";
+          fmt::print(stderr, "Expected data size to align with the number of blocks and chunk size\n");
       return 1;
     }
 
@@ -175,16 +173,16 @@ int main(int argc, char* argv[])
             k);
 
   if (print || verify)
-    master.foreach<ValueBlock>(&set_min_max, &nblocks);
+    master.foreach([nblocks](ValueBlock* b, const diy::Master::ProxyWithLink& cp) { set_min_max(b, cp, nblocks); });
 
   if (print)
   {
-    printf("Printing blocks\n");
-    master.foreach(&ValueBlock::print_block, &verbose);
+    fmt::print("Printing blocks\n");
+    master.foreach([verbose](ValueBlock* b, const diy::Master::ProxyWithLink& cp) { b->print_block(cp, verbose); });
   }
   if (verify)
   {
-    printf("Verifying blocks\n");
+    fmt::print("Verifying blocks\n");
     master.foreach(&ValueBlock::verify_block);
 
     master.exchange();      // to process collectives

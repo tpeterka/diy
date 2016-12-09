@@ -49,8 +49,8 @@ void redistribute(void* b_,                                 // local block
 
         std::vector<Block::Point>    in_points;
         srp.dequeue(nbr_gid, in_points);
-        fprintf(stderr, "[%d:%d] Received %d points from [%d]\n",
-                srp.gid(), round, (int) in_points.size(), nbr_gid);
+        fmt::print(stderr, "[{}:{}] Received {} points from [{}]\n",
+                   srp.gid(), round, (int) in_points.size(), nbr_gid);
         for (size_t j = 0; j < in_points.size(); ++j)
             b->points.push_back(in_points[j]);
     }
@@ -81,8 +81,8 @@ void redistribute(void* b_,                                 // local block
         else
         {
             srp.enqueue(srp.out_link().target(i), out_points[i]);
-            fprintf(stderr, "[%d] Sent %d points to [%d]\n",
-                    srp.gid(), (int) out_points[i].size(), srp.out_link().target(i).gid);
+            fmt::print(stderr, "[{}] Sent {} points to [{}]\n",
+                       srp.gid(), (int) out_points[i].size(), srp.out_link().target(i).gid);
         }
     }
 
@@ -119,8 +119,7 @@ bool        SwapReduceFixture::verbose     = false;
 
 // check that block values are in the block bounds (debug)
 void          verify_block(Block* b,
-                           const diy::Master::ProxyWithLink& cp, // communication proxy
-                           void*)
+                           const diy::Master::ProxyWithLink& cp) // communication proxy
 {
     const RCLink* link = dynamic_cast<RCLink*>(cp.link());
 
@@ -183,9 +182,10 @@ TEST_CASE_METHOD(SwapReduceFixture, "point sorting", "[swap-reduce]")
                 &redistribute);                 // swap operator callback function
 
     // callback functions for local block
-    master.foreach(&Block::print_block, &verbose);
+    bool v = verbose;
+    master.foreach([v](Block* b, const diy::Master::ProxyWithLink& cp) { b->print_block(cp, v); });
     master.set_threads(1);        // catch.hpp isn't thread-safe
-    master.foreach<Block>(&verify_block);
+    master.foreach(&verify_block);
 }
 
 int main(int argc, char* argv[])

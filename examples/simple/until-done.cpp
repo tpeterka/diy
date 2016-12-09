@@ -20,15 +20,13 @@ void    save_block(const void* b,
 void    load_block(void* b,
                    diy::BinaryBuffer& bb)   { diy::load(bb, *static_cast<Block*>(b)); }
 
-void flip_coin(void* b_, const diy::Master::ProxyWithLink& cp, void*)
+void flip_coin(Block* b, const diy::Master::ProxyWithLink& cp)
 {
-  Block*        b = static_cast<Block*>(b_);
-
   b->count++;
-  bool done = rand() % 2;
+  int done = rand() % 2;
   //std::cout << cp.gid() << "  " << done << " " << b->count << std::endl;
   cp.collectives()->clear();
-  cp.all_reduce(done, std::logical_and<bool>());
+  cp.all_reduce(done, std::logical_and<int>());
 }
 
 int main(int argc, char* argv[])
