@@ -21,14 +21,14 @@ void    save_block(const void* b,
 void    load_block(void* b,
                    diy::BinaryBuffer& bb)   { diy::load(bb, *static_cast<Block*>(b)); }
 
-bool foo(void* b_, const diy::Master::IProxyWithLink& icp, void*)
+bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
 {
-    Block*        b = static_cast<Block*>(b_);
     diy::Link*    l = icp.link();
 
+    size_t tot_q_size;
     while (1)
     {
-        size_t tot_q_size = 0;
+        tot_q_size = 0;
         for (size_t i = 0; i < l->size(); ++i)
         {
             tot_q_size += icp.incoming(i).size();
@@ -50,8 +50,9 @@ bool foo(void* b_, const diy::Master::IProxyWithLink& icp, void*)
     icp.collectives()->clear();
     icp.all_reduce(done, std::plus<int>());
 
-    auto console = spd::get("console");
-    console->debug("count={} done={}", b->count, done);
+    // TODO: can't find spd
+    // auto console = spd::get("console");
+    // console->debug("count={} done={}", b->count, done);
 
     return (tot_q_size ? false : true);
 }
@@ -83,7 +84,7 @@ int main(int argc, char* argv[])
             master.add(gid, new Block, new diy::Link);
 
     // dequeue, enqueue, exchange all in one nonblocking routine
-    master.iexchange(foo);
+    master.iexchange(&foo);
 
     if (world.rank() == 0)
     {

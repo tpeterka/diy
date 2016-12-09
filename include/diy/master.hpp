@@ -75,6 +75,10 @@ namespace diy
       template<class Block>
       using Callback = std::function<void(Block*, const ProxyWithLink&)>;
 
+      // iexchange callback
+      template<class Block>
+      using ICallback = std::function<bool(Block*, const IProxyWithLink&)>;
+
       struct QueuePolicy
       {
         virtual bool    unload_incoming(const Master& master, int from, int to, size_t size) const  =0;
@@ -221,8 +225,15 @@ namespace diy
       inline void   exchange();
 
       //! nonblocking exchange of the queues between all the blocks
-      template<class Functor>
-      inline void   iexchange(const Functor& f, size_t max_q_size = DIY_MAX_Q_SIZE);
+      template<class Block>
+      void          iexchange_(const ICallback<Block>& f, size_t max_q_size = DIY_MAX_Q_SIZE);
+
+      template<class F>
+      void          iexchange(const F& f, size_t max_q_size = DIY_MAX_Q_SIZE)
+      {
+          using Block = typename detail::block_traits<F>::type;
+          iexchange_<Block>(f, max_q_size);
+      }
 
       inline void   process_collectives();
 
@@ -831,10 +842,10 @@ namespace detail
 
 } // namespace diy
 
-template<class Functor>
+template<class Block>
 void
 diy::Master::
-iexchange(const Functor& f, size_t max_q_size)
+iexchange_(const ICallback<Block>& f, size_t max_q_size)
 {
     // TODO: separate comm thread?
 
@@ -847,7 +858,8 @@ iexchange(const Functor& f, size_t max_q_size)
             IProxyWithLink icp(IProxyWithLink(Proxy(const_cast<Master*>(this), gid(i)),
                                               block(i),
                                               link(i)));
-            all_done = f(block(i), icp);     // TODO: push command and execute (for skip)
+            // TODO: push command and execute (for skip)
+            all_done = f(static_cast<Block*>(block(i)), icp);
 
             // TODO?
             // flush(outgoing);
