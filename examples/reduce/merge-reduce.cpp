@@ -22,8 +22,6 @@ using namespace std;
 typedef     diy::ContinuousBounds       Bounds;
 typedef     diy::RegularContinuousLink  RCLink;
 
-#if 1 // Block without AddBlock
-
 // --- block structure ---//
 
 // the contents of a block are completely user-defined
@@ -64,120 +62,6 @@ struct Block
 private:
     Block()                                     {}
 };
-
-#else // Block combined with AddBlock
-
-// the contents of a block are completely user-defined
-// however, a block must have functions defined to create, destroy, save, and load it
-// create and destroy allocate and free the block, while
-// save and load serialize and deserialize the block
-// these four functions are called when blocks are cycled in- and out-of-core
-// they can be member functions of the block, as below, or separate standalone functions
-struct Block
-{
-    Block(int gid,                // block global id
-          const Bounds& core,     // block bounds without any ghost added
-          const Bounds& bounds,   // block bounds including any ghost region added
-          const Bounds& domain,   // global data bounds
-          const RCLink& link,     // neighborhood
-          const diy::Master& master,
-          const size_t  num_pts) : bounds(core)
-        {
-            Block*          b   = this;
-            RCLink*         l   = new RCLink(link);
-            diy::Master&    m   = const_cast<diy::Master&>(master);
-
-            m.add(gid, b, l); // add block to the master (mandatory)
-            b->generate_data(num_pts);          // initialize block data (typical)
-        }
-
-    static void*    create()                                   // allocate a new block
-    { return new Block; }
-    static void     destroy(void* b)                           // free a block
-    { delete static_cast<Block*>(b); }
-    static void     save(const void* b, diy::BinaryBuffer& bb) // serialize the block and write it
-    {
-        diy::save(bb, static_cast<const Block*>(b)->bounds);
-        diy::save(bb, static_cast<const Block*>(b)->data);
-    }
-    static void     load(void* b, diy::BinaryBuffer& bb)       // read the block and deserialize it
-    {
-        diy::load(bb, static_cast<Block*>(b)->bounds);
-        diy::load(bb, static_cast<Block*>(b)->data);
-    }
-
-    void            generate_data(size_t n)                    // initialize block values
-    {
-        data.resize(n);
-        for (size_t i = 0; i < n; ++i)
-            data[i] = i;
-    }
-
-    // block data
-    Bounds          bounds;
-    vector<int>     data;
-private:
-    Block()                                     {}
-};
-
-#endif
-
-#if 0 // Addblock functor
-
-// diy::decompose needs to have a function defined to create a block
-// here, it is wrapped in an object to add blocks with an overloaded () operator
-// it could have also been written as a standalone function
-struct AddBlock
-{
-    AddBlock(diy::Master& master_, size_t num_points_):
-        master(master_),
-        num_points(num_points_)
-        {}
-
-    // this is the function that is needed for diy::decompose
-    void  operator()(int gid,                // block global id
-                     const Bounds& core,     // block bounds without any ghost added
-                     const Bounds& bounds,   // block bounds including any ghost region added
-                     const Bounds& domain,   // global data bounds
-                     const RCLink& link)     // neighborhood
-        const
-        {
-            Block*          b   = new Block(core);
-            RCLink*         l   = new RCLink(link);
-            diy::Master&    m   = const_cast<diy::Master&>(master);
-
-            m.add(gid, b, l); // add block to the master (mandatory)
-
-            b->generate_data(num_points);          // initialize block data (typical)
-        }
-
-    diy::Master&  master;
-    size_t        num_points;
-};
-
-#else
-
-// AddBlock that can be called through a lambda
-struct AddBlock
-{
-    AddBlock(int gid,                // block global id
-             const Bounds& core,     // block bounds without any ghost added
-             const Bounds& bounds,   // block bounds including any ghost region added
-             const Bounds& domain,   // global data bounds
-             const RCLink& link,     // neighborhood
-             const diy::Master& master,
-             const size_t  num_pts)
-        {
-            Block*          b   = new Block(core);
-            RCLink*         l   = new RCLink(link);
-            diy::Master&    m   = const_cast<diy::Master&>(master);
-
-            m.add(gid, b, l); // add block to the master (mandatory)
-            b->generate_data(num_pts);          // initialize block data (typical)
-        }
-};
-
-#endif
 
 // --- callback functions ---//
 
@@ -309,13 +193,9 @@ int main(int argc, char* argv[])
     // decompose the domain into blocks
     diy::RegularDecomposer<Bounds> decomposer(dim, domain, nblocks);
 
-#if 0 // use a functor
-
-    AddBlock               create(master, num_points); // an object for adding new blocks to master
-    decomposer.decompose(world.rank(), assigner, create);
-
-#else  // use a lambda
-
+    // this example uses a lambda expression to add a block during decomposition
+    // the alternative is to write a functor and pass it to decompose()
+    // lambdas are usually a more compact way to do the same thing as functors
     decomposer.decompose(world.rank(),
                          assigner,
                          [&](int gid,
@@ -323,9 +203,14 @@ int main(int argc, char* argv[])
                              const Bounds& bounds,
                              const Bounds& domain,
                              const RCLink& link)
-                         { AddBlock(gid, core, bounds, domain, link, master, num_points); });
+                         {
+                             Block*          b   = new Block(core);
+                             RCLink*         l   = new RCLink(link);
+                             diy::Master&    m   = const_cast<diy::Master&>(master);
 
-#endif
+                             m.add(gid, b, l);              // add block to the master (mandatory)
+                             b->generate_data(num_points);  // initialize block data (typical)
+                         });
 
     // merge-based reduction: create the partners that determine how groups are formed
     // in each round and then execute the reduction
