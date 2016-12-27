@@ -8,20 +8,24 @@
 #include <algorithm>
 #include <functional>
 
-#include "link.hpp"
-#include "collection.hpp"
+#include "../link.hpp"
+#include "../collection.hpp"
 
 // Communicator functionality
-#include "mpi.hpp"
-#include "serialization.hpp"
-#include "detail/collectives.hpp"
-#include "time.hpp"
+#include "../mpi.hpp"
+#include "../serialization.hpp"
+#include "../detail/collectives.hpp"
+#include "../time.hpp"
 
-#include "thread.hpp"
+#include "../thread.hpp"
 
-#include "detail/block_traits.hpp"
+// TODO: I just made this up
+static const size_t DIY_MAX_Q_SIZE = 8;
 
-#include "log.hpp"
+#include "../detail/block_traits.hpp"
+
+#include "../log.hpp"
+
 
 namespace diy
 {
@@ -62,11 +66,16 @@ namespace diy
     public:
       // Communicator types
       struct Proxy;
+      struct IProxyWithLink;
       struct ProxyWithLink;
 
       // foreach callback
       template<class Block>
       using Callback = std::function<void(Block*, const ProxyWithLink&)>;
+
+      // iexchange callback
+      template<class Block>
+      using ICallback = std::function<bool(Block*, const IProxyWithLink&)>;
 
       struct QueuePolicy
       {
@@ -212,6 +221,18 @@ namespace diy
 
       //! exchange the queues between all the blocks (collective operation)
       inline void   exchange();
+
+      //! nonblocking exchange of the queues between all the blocks
+      template<class Block>
+      void          iexchange_(const ICallback<Block>& f, size_t max_q_size = DIY_MAX_Q_SIZE);
+
+      template<class F>
+      void          iexchange(const F& f, size_t max_q_size = DIY_MAX_Q_SIZE)
+      {
+          using Block = typename detail::block_traits<F>::type;
+          iexchange_<Block>(f, max_q_size);
+      }
+
       inline void   process_collectives();
 
       inline
@@ -271,12 +292,23 @@ namespace diy
       inline void       comm_exchange(ToSendList& to_send, int out_queues_limit);     // possibly called in between block computations
       inline bool       nudge();
 
+      // iexchange commmunication
+      inline void       communicate();
+      inline void prep_out(ToSendList& to_send);
+      inline int limit_out(const ToSendList& to_send);
+      inline void icomm_exchange(ToSendList& to_send, int out_queues_limit);
+      inline void send_outgoing(ToSendList& to_send, int out_queues_limit);
+      inline void recv_incoming();
+
       void              cancel_requests();              // TODO
 
       // debug
       inline void       show_incoming_records() const;
 
-    private:
+      OutgoingQueuesMap& outgoing()                     { return outgoing_; }
+      IncomingQueuesMap& incoming()                     { return incoming_; }
+
+  private:
       std::vector<Link*>    links_;
       Collection            blocks_;
       std::vector<int>      gids_;
@@ -816,6 +848,30 @@ namespace detail
 
 } // namespace diy
 
+template<class Block>
+void
+diy::Master::
+iexchange_(const ICallback<Block>& f, size_t max_q_size)
+{
+    // TODO: separate comm thread
+    // std::thread t(communicate);
+    communicate();
+
+    bool all_done = false;
+    while (!all_done)
+    {
+        for (size_t i = 0; i < size(); i++)  // for all blocks
+        {
+            // iexchange comm proxy
+            IProxyWithLink icp(IProxyWithLink(Proxy(const_cast<Master*>(this), gid(i)),
+                                              block(i),
+                                              link(i)));
+            all_done = f(static_cast<Block*>(block(i)), icp);
+            communicate();
+        }
+    }
+}
+
 /* Communicator */
 void
 diy::Master::
@@ -1027,6 +1083,36 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
 
 void
 diy::Master::
+communicate()
+{
+#ifdef DEBUG
+    time_type start = get_time();
+    unsigned wait = 1;
+#endif
+
+    // prepare list of outgoing messages
+    ToSendList to_send;                          // gids of destinations
+    prep_out(to_send);
+
+    // decide how many queues to keep in memory
+    int out_queues_limit = limit_out(to_send);
+
+    // lock out other threads
+    // TODO: not threaded yet
+    // if (!CAS(comm_flag, 0, 1))
+    //     return;
+
+    // exchange
+    icomm_exchange(to_send, out_queues_limit);
+
+    // cleanup
+    outgoing_.clear();
+    log->debug("Done in communicate()");
+    received_ = 0;
+}
+
+void
+diy::Master::
 flush()
 {
 #ifdef DEBUG
@@ -1078,6 +1164,278 @@ flush()
   comm_.barrier();
 
   received_ = 0;
+}
+
+// fill list of outgoing queues to send (the ones in memory come first)
+void
+diy::Master::
+prep_out(ToSendList& to_send)
+{
+    for (OutgoingQueuesMap::iterator it = outgoing_.begin(); it != outgoing_.end(); ++it)
+    {
+        OutgoingQueuesRecord& out = it->second;
+        if (out.external == -1)
+            to_send.push_front(it->first);
+        else
+            to_send.push_back(it->first);
+    }
+    log->debug("to_send.size(): {}", to_send.size());
+}
+
+// compute maximum number of queues to keep in memory
+// first version just average number of queues per block * num_blocks in memory
+int
+diy::Master::
+limit_out(const ToSendList& to_send)
+{
+    // XXX: we probably want a cleverer limit than
+    // block limit times average number of queues per block
+    // XXX: with queues we could easily maintain a specific space limit
+    int out_queues_limit;
+    if (limit_ == -1 || size() == 0)
+        return to_send.size();
+    else
+        // average number of queues per block * in-memory block limit
+        return std::max((size_t) 1, to_send.size() / size() * limit_);
+}
+
+// do the actual exchange: send outgoing, nudge MPI, receive incoming
+void
+diy::Master::
+icomm_exchange(ToSendList& to_send, int out_queues_limit)
+{
+    do
+    {
+        send_outgoing(to_send, out_queues_limit);
+        while(nudge());
+        recv_incoming();
+
+#ifdef DEBUG
+        time_type cur = get_time();
+        if (cur - start > wait*1000)
+        {
+            log->notice("Waiting in flush [{}]: {} - {} out of {}",
+                        comm_.rank(), inflight_sends_.size(), received_, expected_);
+            wait *= 2;
+        }
+#endif
+    } while (!inflight_sends_.empty() || received_ < expected_ || !to_send.empty());
+}
+
+// send outgoing queues
+void
+diy::Master::
+send_outgoing(ToSendList& to_send, int out_queues_limit)
+{
+    static const size_t MAX_MPI_MESSAGE_COUNT = INT_MAX;
+
+    // isend outgoing queues, up to the out_queues_limit
+    while (inflight_sends_.size() < (size_t)out_queues_limit && !to_send.empty())
+    {
+        int from = to_send.front();
+
+        // deal with external_local queues
+        for (OutQueueRecords::iterator it = outgoing_[from].external_local.begin();
+             it != outgoing_[from].external_local.end(); ++it)
+        {
+            int to = it->first.gid;
+
+            log->debug("Processing local queue: {} <- {} of size {}", to, from, it->second.size);
+
+            QueueRecord& in_qr  = incoming_[to].records[from];
+            bool in_external  = block(lid(to)) == 0;
+
+            if (in_external)
+                in_qr = it->second;
+            else
+            {
+                // load the queue
+                in_qr.size     = it->second.size;
+                in_qr.external = -1;
+
+                MemoryBuffer bb;
+                storage_->get(it->second.external, bb);
+
+                incoming_[to].queues[from].swap(bb);
+            }
+            ++received_;
+        }
+        outgoing_[from].external_local.clear();
+
+        if (outgoing_[from].external != -1)
+            load_outgoing(from);
+        to_send.pop_front();
+
+        OutgoingQueues& outgoing = outgoing_[from].queues;
+        for (OutgoingQueues::iterator it = outgoing.begin(); it != outgoing.end(); ++it)
+        {
+            BlockID to_proc = it->first;
+            int     to      = to_proc.gid;
+            int     proc    = to_proc.proc;
+
+            log->debug("Processing queue:      {} <- {} of size {}",
+                       to, from, outgoing_[from].queues[to_proc].size());
+
+            // There may be local outgoing queues that remained in memory
+            if (proc == comm_.rank())     // sending to ourselves: simply swap buffers
+            {
+                log->debug("Moving queue in-place: {} <- {}", to, from);
+
+                QueueRecord& in_qr  = incoming_[to].records[from];
+                bool in_external  = block(lid(to)) == 0;
+                if (in_external)
+                {
+                    log->debug("Unloading outgoing directly as incoming: {} <- {}", to, from);
+                    MemoryBuffer& bb = it->second;
+                    in_qr.size = bb.size();
+                    if (queue_policy_->unload_incoming(*this, from, to, in_qr.size))
+                        in_qr.external = storage_->put(bb);
+                    else
+                    {
+                        MemoryBuffer& in_bb = incoming_[to].queues[from];
+                        in_bb.swap(bb);
+                        in_bb.reset();
+                        in_qr.external = -1;
+                    }
+                } else        // !in_external
+                {
+                    log->debug("Swapping in memory:    {} <- {}", to, from);
+                    MemoryBuffer& bb = incoming_[to].queues[from];
+                    bb.swap(it->second);
+                    bb.reset();
+                    in_qr.size = bb.size();
+                    in_qr.external = -1;
+                }
+
+                ++received_;
+                continue;
+            }
+
+            std::shared_ptr<MemoryBuffer> buffer = std::make_shared<MemoryBuffer>();
+            buffer->swap(it->second);
+
+            std::pair<int, int> tail = std::make_pair(from, to);
+            if (buffer->size() <= (MAX_MPI_MESSAGE_COUNT - sizeof(tail)))
+            {
+                diy::save(*buffer, tail);
+
+                inflight_sends_.emplace_back();
+                inflight_sends_.back().from = from;
+                inflight_sends_.back().to   = to;
+                inflight_sends_.back().request = comm_.isend(proc, tags::queue, buffer->buffer);
+                inflight_sends_.back().message = buffer;
+            }
+            else
+            {
+                int npieces = static_cast<int>((buffer->size() +
+                                                MAX_MPI_MESSAGE_COUNT - 1) /
+                                               MAX_MPI_MESSAGE_COUNT);
+
+                // first send the head
+                std::shared_ptr<MemoryBuffer> hb = std::make_shared<MemoryBuffer>();
+                diy::save(*hb, buffer->size());
+                diy::save(*hb, from);
+                diy::save(*hb, to);
+
+                inflight_sends_.emplace_back();
+                inflight_sends_.back().from = from;
+                inflight_sends_.back().to   = to;
+                inflight_sends_.back().request = comm_.isend(proc, tags::piece, hb->buffer);
+                inflight_sends_.back().message = hb;
+
+                // send the message pieces
+                size_t msg_buff_idx = 0;
+                for (int i = 0; i < npieces; ++i, msg_buff_idx += MAX_MPI_MESSAGE_COUNT)
+                {
+                    int tag = (i == (npieces - 1)) ? tags::queue : tags::piece;
+
+                    detail::VectorWindow<char> window;
+                    window.begin = &buffer->buffer[msg_buff_idx];
+                    window.count = std::min(MAX_MPI_MESSAGE_COUNT, buffer->size() - msg_buff_idx);
+
+                    inflight_sends_.emplace_back();
+                    inflight_sends_.back().from = from;
+                    inflight_sends_.back().to   = to;
+                    inflight_sends_.back().request = comm_.isend(proc, tag, window);
+                    inflight_sends_.back().message = buffer;
+                }
+            }
+        }
+    }
+}
+
+// receive incoming queues
+void
+diy::Master::
+recv_incoming()
+{
+    // check incoming queues
+    mpi::optional<mpi::status> ostatus = comm_.iprobe(mpi::any_source, mpi::any_tag);
+    while (ostatus)
+    {
+        InFlightRecv &ir = inflight_recvs_[ostatus->source()];
+        int &from = ir.from, &to = ir.to;
+
+        if (from == -1) // uninitialized
+        {
+            MemoryBuffer bb;
+            comm_.recv(ostatus->source(), ostatus->tag(), bb.buffer);
+
+            if (ostatus->tag() == tags::piece)
+            {
+                size_t msg_size;
+                diy::load(bb, msg_size);
+                diy::load(bb, from);
+                diy::load(bb, to);
+
+                ir.message.buffer.reserve(msg_size);
+            }
+            else // tags::queue
+            {
+                std::pair<int,int> tail;
+                diy::load_back(bb, tail);
+
+                from = tail.first;
+                to   = tail.second;
+                ir.message.swap(bb);
+            }
+        }
+        else
+        {
+            size_t start_idx = ir.message.buffer.size();
+            size_t count = ostatus->count<char>();
+            ir.message.buffer.resize(start_idx + count);
+
+            detail::VectorWindow<char> window;
+            window.begin = &ir.message.buffer[start_idx];
+            window.count = count;
+
+            comm_.recv(ostatus->source(), ostatus->tag(), window);
+        }
+
+        if (ostatus->tag() == tags::queue)
+        {
+            size_t size  = ir.message.size();
+            int external = -1;
+
+            if (block(lid(to)) != 0 || !queue_policy_->unload_incoming(*this, from, to, size))
+            {
+                incoming_[to].queues[from].swap(ir.message);
+                incoming_[to].queues[from].reset();     // buffer position = 0
+            }
+            else if (queue_policy_->unload_incoming(*this, from, to, size))
+            {
+                log->debug("Directly unloading queue {} <- {}", to, from);
+                external = storage_->put(ir.message); // unload directly
+            }
+            incoming_[to].records[from] = QueueRecord(size, external);
+
+            ++received_;
+            ir = InFlightRecv(); // reset
+        }
+
+        ostatus = comm_.iprobe(mpi::any_source, mpi::any_tag);
+    }
 }
 
 void

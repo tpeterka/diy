@@ -1,9 +1,8 @@
 #include <vector>
 #include <iostream>
-#include <spdlog/spdlog.h>
 
 #include <diy/mpi.hpp>
-#include <diy/master.hpp>
+#include <diy/iexchange/master.hpp>
 #include <diy/assigner.hpp>
 #include <diy/serialization.hpp>
 
@@ -46,15 +45,13 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
 
     // flip a coin to decide whether to be done
     int done = rand() % 2;
-    //std::cout << cp.gid() << "  " << done << " " << b->count << std::endl;
-    icp.collectives()->clear();
-    icp.all_reduce(done, std::plus<int>());
+    // icp.collectives()->clear();
+    // icp.all_reduce(done, std::plus<int>());
 
-    // TODO: can't find spd
-    // auto console = spd::get("console");
-    // console->debug("count={} done={}", b->count, done);
+    fmt::print(stderr, "gid={} count={} done={}", icp.gid(), b->count, done);
 
-    return (tot_q_size ? false : true);
+    // return (tot_q_size ? false : true);
+    return (true);                           // TODO: hard code all done
 }
 
 int main(int argc, char* argv[])
@@ -87,9 +84,7 @@ int main(int argc, char* argv[])
     master.iexchange(&foo);
 
     if (world.rank() == 0)
-    {
-        namespace spd = spdlog;
-        auto console = spd::stderr_color_mt("console");
-        console->info("Total iterations: {}", master.block<Block>(master.loaded_block())->count);
-    }
+        fmt::print(stderr,
+                   "Total iterations: {}", master.block<Block>(master.loaded_block())->count);
+
 }
