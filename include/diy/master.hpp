@@ -1062,7 +1062,7 @@ flush()
     time_type cur = get_time();
     if (cur - start > wait*1000)
     {
-        log->notice("Waiting in flush [{}]: {} - {} out of {}",
+        log->debug("Waiting in flush [{}]: {} - {} out of {}",
                     comm_.rank(), inflight_sends_.size(), received_, expected_);
         wait *= 2;
     }

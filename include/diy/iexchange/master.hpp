@@ -1085,11 +1085,6 @@ void
 diy::Master::
 communicate()
 {
-#ifdef DEBUG
-    time_type start = get_time();
-    unsigned wait = 1;
-#endif
-
     // prepare list of outgoing messages
     ToSendList to_send;                          // gids of destinations
     prep_out(to_send);
@@ -1148,7 +1143,7 @@ flush()
     time_type cur = get_time();
     if (cur - start > wait*1000)
     {
-        log->notice("Waiting in flush [{}]: {} - {} out of {}",
+        log->debug("Waiting in flush [{}]: {} - {} out of {}",
                     comm_.rank(), inflight_sends_.size(), received_, expected_);
         wait *= 2;
     }
@@ -1209,16 +1204,6 @@ icomm_exchange(ToSendList& to_send, int out_queues_limit)
         send_outgoing(to_send, out_queues_limit);
         while(nudge());
         recv_incoming();
-
-#ifdef DEBUG
-        time_type cur = get_time();
-        if (cur - start > wait*1000)
-        {
-            log->notice("Waiting in flush [{}]: {} - {} out of {}",
-                        comm_.rank(), inflight_sends_.size(), received_, expected_);
-            wait *= 2;
-        }
-#endif
     } while (!inflight_sends_.empty() || received_ < expected_ || !to_send.empty());
 }
 
