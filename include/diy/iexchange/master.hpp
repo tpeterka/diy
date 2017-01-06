@@ -21,6 +21,7 @@
 
 // TODO: I just made this up
 static const size_t DIY_MAX_Q_SIZE = 8;
+static const size_t DIY_MAX_RECV_TRIES = 1;
 
 #include "../detail/block_traits.hpp"
 
@@ -224,13 +225,17 @@ namespace diy
 
       //! nonblocking exchange of the queues between all the blocks
       template<class Block>
-      void          iexchange_(const ICallback<Block>& f, size_t max_q_size = DIY_MAX_Q_SIZE);
+      void          iexchange_(const ICallback<Block>& f,
+                               size_t max_q_size = DIY_MAX_Q_SIZE,
+                               size_t max_recv_tries = DIY_MAX_RECV_TRIES);
 
       template<class F>
-      void          iexchange(const F& f, size_t max_q_size = DIY_MAX_Q_SIZE)
+      void          iexchange(const F& f,
+                              size_t max_q_size = DIY_MAX_Q_SIZE,
+                              size_t max_recv_tries = DIY_MAX_RECV_TRIES)
       {
           using Block = typename detail::block_traits<F>::type;
-          iexchange_<Block>(f, max_q_size);
+          iexchange_<Block>(f, max_q_size, max_recv_tries);
       }
 
       inline void   process_collectives();
@@ -293,12 +298,15 @@ namespace diy
       inline bool       nudge();
 
       // iexchange commmunication
-      inline void       communicate();
-      inline void prep_out(ToSendList& to_send);
-      inline int limit_out(const ToSendList& to_send);
-      inline void icomm_exchange(ToSendList& to_send, int out_queues_limit);
-      inline void send_outgoing(ToSendList& to_send, int out_queues_limit);
-      inline void recv_incoming();
+      inline void       communicate(size_t max_recv_tries = DIY_MAX_RECV_TRIES);
+      inline void       prep_out(ToSendList& to_send);
+      inline int        limit_out(const ToSendList& to_send);
+      inline void       icomm_exchange(ToSendList& to_send,
+                                       size_t out_queues_limit,
+                                       size_t max_recv_tries);
+      inline void       send_outgoing(ToSendList& to_send,
+                                      size_t out_queues_limit);
+      inline void       recv_incoming();
 
       void              cancel_requests();              // TODO
 
@@ -851,11 +859,13 @@ namespace detail
 template<class Block>
 void
 diy::Master::
-iexchange_(const ICallback<Block>& f, size_t max_q_size)
+iexchange_(const ICallback<Block>& f,
+           size_t max_q_size,
+           size_t max_recv_tries)
 {
     // TODO: separate comm thread
     // std::thread t(communicate);
-    communicate();
+    communicate(max_recv_tries);
 
     bool all_done = false;
     while (!all_done)
@@ -867,7 +877,7 @@ iexchange_(const ICallback<Block>& f, size_t max_q_size)
                                               block(i),
                                               link(i)));
             all_done = f(static_cast<Block*>(block(i)), icp);
-            communicate();
+            communicate(max_recv_tries);
         }
     }
 }
@@ -1083,7 +1093,7 @@ comm_exchange(ToSendList& to_send, int out_queues_limit)
 
 void
 diy::Master::
-communicate()
+communicate(size_t max_recv_tries)
 {
     // prepare list of outgoing messages
     ToSendList to_send;                          // gids of destinations
@@ -1097,8 +1107,11 @@ communicate()
     // if (!CAS(comm_flag, 0, 1))
     //     return;
 
+    // debug
+    log->info("out_queues_limit: {}", out_queues_limit);
+
     // exchange
-    icomm_exchange(to_send, out_queues_limit);
+    icomm_exchange(to_send, out_queues_limit, max_recv_tries);
 
     // cleanup
     outgoing_.clear();
@@ -1197,20 +1210,26 @@ limit_out(const ToSendList& to_send)
 // do the actual exchange: send outgoing, nudge MPI, receive incoming
 void
 diy::Master::
-icomm_exchange(ToSendList& to_send, int out_queues_limit)
+icomm_exchange(ToSendList& to_send,
+               size_t out_queues_limit,
+               size_t max_recv_tries)
 {
+    size_t num_tries = 0;
     do
     {
         send_outgoing(to_send, out_queues_limit);
         while(nudge());
         recv_incoming();
-    } while (!inflight_sends_.empty() || received_ < expected_ || !to_send.empty());
+        num_tries++;
+    } while (num_tries < max_recv_tries &&
+             (!inflight_sends_.empty() || received_ < expected_ || !to_send.empty()));
 }
 
 // send outgoing queues
 void
 diy::Master::
-send_outgoing(ToSendList& to_send, int out_queues_limit)
+send_outgoing(ToSendList& to_send,
+              size_t out_queues_limit)
 {
     static const size_t MAX_MPI_MESSAGE_COUNT = INT_MAX;
 
@@ -1224,7 +1243,6 @@ send_outgoing(ToSendList& to_send, int out_queues_limit)
              it != outgoing_[from].external_local.end(); ++it)
         {
             int to = it->first.gid;
-
             log->debug("Processing local queue: {} <- {} of size {}", to, from, it->second.size);
 
             QueueRecord& in_qr  = incoming_[to].records[from];

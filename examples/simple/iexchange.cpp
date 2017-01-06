@@ -29,8 +29,9 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
     {
         for (size_t i = 0; i < l->size(); ++i)
         {
-            fmt::print(stderr, "enq: gid={} count={} done={}\n", icp.gid(), b->count);
+            fmt::print(stderr, "enq: gid={} count={}\n", icp.gid(), b->count);
             icp.enqueue(icp.link()->target(i), b->count);
+            b->count++;
         }
     }
 
@@ -46,7 +47,7 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
             {
                 icp.dequeue(icp.link()->target(i).gid, b->count);
                 b->count++;
-                fmt::print(stderr, "deq: gid={} count={} done={}\n", icp.gid(), b->count);
+                fmt::print(stderr, "deq: gid={} count={}\n", icp.gid(), b->count);
                 icp.enqueue(icp.link()->target(i), b->count);
             }
         }
