@@ -69,6 +69,8 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
 
 int main(int argc, char* argv[])
 {
+    diy::create_logger("trace");
+
     diy::mpi::environment     env(argc, argv);
     diy::mpi::communicator    world;
 
