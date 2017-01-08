@@ -29,32 +29,44 @@ static const size_t DIY_MAX_RECV_TRIES = 1;
 
 // psuedocode for iexchange protocol
 //
-// iexchange
-//     communicate
+// iexchange()
+// {
+//     communicate()
 //     for all blocks
 //         iproxywith link
 //         f
-//         communicate
+//         communicate()
+// }
 
-// communicate
-//     prep_out
-//     limit_out
-//     icomm_exchange
-//         while (more to send or receive)
-//             send
-//                 copied from previous comm_exchange
-//             nudge
-//             recv
-//                 copied from previous comm_exchange
+// communicate()
+// {
+//     prep_out()
+//     limit_out()
+//     icomm_exchange()
 //     cleanup
+// }
 
-// enqueue
-//     enqueue
-// 	communicate
+// icomm_exchange()
+// {
+//     while (more to send or receive)
+//         send_outgoing
+//             copied from previous comm_exchange
+//         nudge()
+//         recv_incoming()
+//             copied from previous comm_exchange
+// }
 
-// dequeue
-// 	communicate
-// 	dequeue
+// IProxyWithLink::enqueue()
+// {
+//      Proxy::enqueue()
+// 	communicate()
+// }
+
+// IProxyWithLink::dequeue()
+// {
+// 	communicate()
+// 	Proxy::dequeue()
+// }
 
 namespace diy
 {

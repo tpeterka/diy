@@ -20,40 +20,91 @@ void  save_block(const void* b,
 void  load_block(void* b,
                  diy::BinaryBuffer& bb)   { diy::load(bb, *static_cast<Block*>(b)); }
 
-bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
+// debug: test enqueue with original synchronous exchange
+void enq(Block* b, const diy::Master::ProxyWithLink& cp)
 {
-    diy::Link* l = icp.link();
+    diy::Link* l = cp.link();
 
     // start with every block enqueueing its count the first time
     if (!b->count)
     {
         for (size_t i = 0; i < l->size(); ++i)
+            cp.enqueue(cp.link()->target(i), b->count);
+        b->count++;
+    }
+}
+
+// debug: test dequeue with original synchronous exchange
+void deq(Block* b, const diy::Master::ProxyWithLink& cp)
+{
+    diy::Link* l = cp.link();
+
+    for (size_t i = 0; i < l->size(); ++i)
+    {
+        int gid = l->target(i).gid;
+        if (cp.incoming(gid).size())
         {
-            fmt::print(stderr, "enq: gid={} count={}\n", icp.gid(), b->count);
-            icp.enqueue(icp.link()->target(i), b->count);
+            cp.dequeue(cp.link()->target(i).gid, b->count);
             b->count++;
+            cp.enqueue(cp.link()->target(i), b->count);
         }
     }
+}
+
+// callback for asynchronous iexchange
+bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
+{
+    diy::Link* l = icp.link();
+    int my_gid = icp.gid();
+
+    // start with every block enqueueing its count the first time
+    if (!b->count)
+    {
+        for (size_t i = 0; i < l->size(); ++i)
+            icp.enqueue(l->target(i), b->count);
+        b->count++;
+    }
+    fmt::print(stderr, "1: gid={} count={}\n", my_gid, b->count);
 
     // then dequeue/enqueue as long as there is something to do
+    // TODO: dequeue does not clear incoming queue, should it?
+    // does this pattern of looping while there is a nonzero q make sense?
+#if 0
     size_t tot_q_size;
     while (1)
     {
         tot_q_size = 0;
         for (size_t i = 0; i < l->size(); ++i)
         {
-            tot_q_size += icp.incoming(i).size();
-            if (icp.incoming(i).size())
+            int nbr_gid = l->target(i).gid;
+            tot_q_size += icp.incoming(nbr_gid).size();
+            if (icp.incoming(nbr_gid).size())
             {
-                icp.dequeue(icp.link()->target(i).gid, b->count);
+                icp.dequeue(nbr_gid, b->count);
                 b->count++;
-                fmt::print(stderr, "deq: gid={} count={}\n", icp.gid(), b->count);
-                icp.enqueue(icp.link()->target(i), b->count);
+                icp.enqueue(l->target(i), b->count);
             }
         }
 
         if (!tot_q_size)
             break;
+    }
+#endif
+
+    // then dequeue/enqueue
+    fmt::print(stderr, "2: gid={} count={}\n", my_gid, b->count);
+    for (size_t i = 0; i < l->size(); ++i)
+    {
+        int nbr_gid = l->target(i).gid;
+        if (icp.incoming(nbr_gid).size())
+        {
+            fmt::print(stderr, "3: gid={}\n", my_gid);
+            icp.dequeue(nbr_gid, b->count);
+            b->count++;
+            fmt::print(stderr, "4: gid={} count={}\n", my_gid, b->count);
+            icp.enqueue(l->target(i), b->count);
+            fmt::print(stderr, "5: gid={} count={}\n", my_gid, b->count);
+        }
     }
 
     // flip a coin to decide whether to be done
@@ -61,7 +112,7 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
     // icp.collectives()->clear();
     // icp.all_reduce(done, std::plus<int>());
 
-    fmt::print(stderr, "returning: gid={} count={} done={}\n", icp.gid(), b->count, done);
+    fmt::print(stderr, "returning: gid={} count={} done={}\n", my_gid, b->count, done);
 
     // return (tot_q_size ? false : true);
     return (true);                           // TODO: hard code all done
@@ -91,10 +142,6 @@ int main(int argc, char* argv[])
 
     diy::RoundRobinAssigner   assigner(world.size(), nblocks);
 
-    // for (int gid = 0; gid < nblocks; ++gid)
-    //     if (assigner.rank(gid) == world.rank())
-    //         master.add(gid, new Block, new diy::Link);
-
     // this example creates a linear chain of blocks
     std::vector<int> gids;                     // global ids of local blocks
     assigner.local_gids(world.rank(), gids);   // get the gids of local blocks
@@ -120,8 +167,15 @@ int main(int argc, char* argv[])
         master.add(gid, new Block, link);    // add the current local block to the master
     }
 
+#if 0
+    // test synchronous version
+    master.foreach(&enq);
+    master.exchange();
+    master.foreach(&deq);
+#else
     // dequeue, enqueue, exchange all in one nonblocking routine
     master.iexchange(&foo);
+#endif
 
     if (world.rank() == 0)
         fmt::print(stderr,
