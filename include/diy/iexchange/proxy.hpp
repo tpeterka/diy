@@ -24,7 +24,10 @@ namespace diy
                                     const T&        x,                                      //!< data (eg. STL vector)
                                     void (*save)(BinaryBuffer&, const T&) = &::diy::save<T> //!< optional serialization function
             ) const
-            { OutgoingQueues& out = *outgoing_; save(out[to], x); }
+            {
+                OutgoingQueues& out = *outgoing_;
+                save(out[to], x);
+            }
 
         //! Enqueue data whose size is given explicitly by the user, e.g., an array.
         template<class T>

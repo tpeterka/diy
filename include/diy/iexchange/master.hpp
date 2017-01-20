@@ -33,7 +33,7 @@ static const size_t DIY_MAX_RECV_TRIES = 1;
 // {
 //     communicate()
 //     for all blocks
-//         iproxywith link
+//         iproxywithlink
 //         f
 //         communicate()
 // }
@@ -1135,6 +1135,18 @@ void
 diy::Master::
 communicate(size_t max_recv_tries)
 {
+    // make sure there is a queue for each neighbor
+    for (int i = 0; i < (int)size(); ++i)
+    {
+        OutgoingQueues&  outgoing_queues  = outgoing_[gid(i)].queues;
+        OutQueueRecords& external_local   = outgoing_[gid(i)].external_local;
+        if (outgoing_queues.size() < (size_t)link(i)->size())
+            for (unsigned j = 0; j < (unsigned)link(i)->size(); ++j)
+                // touch the outgoing queue, creating it if necessary
+                if (external_local.find(link(i)->target(j)) == external_local.end())
+                    outgoing_queues[link(i)->target(j)];
+    }
+
     // prepare list of outgoing messages
     ToSendList to_send;                          // gids of destinations
     prep_out(to_send);
