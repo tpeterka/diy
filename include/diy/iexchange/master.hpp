@@ -1166,7 +1166,11 @@ communicate(size_t max_recv_tries)
     icomm_exchange(to_send, out_queues_limit, max_recv_tries);
 
     // cleanup
-    outgoing_.clear();
+
+    // NB: not doing outgoing_.clear() as in Master::flush() so that outgoing queues remain in place
+    // TODO: consider having a flush function for a final cleanup if the user plans to move to
+    // another part of the DIY program
+
     log->debug("Done in communicate()");
     received_ = 0;
 }
