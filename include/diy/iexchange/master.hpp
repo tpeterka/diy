@@ -59,13 +59,13 @@ static const size_t DIY_MAX_RECV_TRIES = 1;
 // IProxyWithLink::enqueue()
 // {
 //      Proxy::enqueue()
-// 	communicate()
+//      communicate()
 // }
 
 // IProxyWithLink::dequeue()
 // {
-// 	communicate()
-// 	Proxy::dequeue()
+//      communicate()
+//      Proxy::dequeue()
 // }
 
 namespace diy

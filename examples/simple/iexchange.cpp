@@ -60,20 +60,18 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
     // start with every block enqueueing its count the first time
     if (!b->count)
     {
-        fmt::print(stderr, "0: enq gid={}\n", my_gid);
         for (size_t i = 0; i < l->size(); ++i)
-        {
-            fmt::print(stderr, "0: i={} gid={}\n", i, my_gid);
             icp.enqueue(l->target(i), b->count);
-        }
         b->count++;
     }
+
     fmt::print(stderr, "1: gid={} count={}\n", my_gid, b->count);
 
     // then dequeue/enqueue as long as there is something to do
     // TODO: dequeue does not clear incoming queue, should it?
     // does this pattern of looping while there is a nonzero q make sense?
-#if 0
+
+#if 1
     size_t tot_q_size;
     while (1)
     {
@@ -84,31 +82,39 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
             tot_q_size += icp.incoming(nbr_gid).size();
             if (icp.incoming(nbr_gid).size())
             {
+                fmt::print(stderr, "3: gid={} tot_q_size={} position={}\n", my_gid, tot_q_size,
+                           icp.incoming(nbr_gid).position);
                 icp.dequeue(nbr_gid, b->count);
+                fmt::print(stderr, "4: gid={} count={}\n", my_gid, b->count);
                 b->count++;
                 icp.enqueue(l->target(i), b->count);
+                fmt::print(stderr, "5: gid={} count={}\n", my_gid, b->count);
             }
         }
 
+        fmt::print(stderr, "2: gid={} tot_q_size = 0\n", my_gid);
         if (!tot_q_size)
             break;
     }
-#endif
 
-    // // then dequeue/enqueue
-    // for (size_t i = 0; i < l->size(); ++i)
-    // {
-    //     int nbr_gid = l->target(i).gid;
-    //     if (icp.incoming(nbr_gid).size())
-    //     {
-    //         fmt::print(stderr, "3: gid={}\n", my_gid);
-    //         icp.dequeue(nbr_gid, b->count);
-    //         b->count++;
-    //         fmt::print(stderr, "4: gid={} count={}\n", my_gid, b->count);
-    //         icp.enqueue(l->target(i), b->count);
-    //         fmt::print(stderr, "5: gid={} count={}\n", my_gid, b->count);
-    //     }
-    // }
+#else
+
+    // then dequeue/enqueue
+    for (size_t i = 0; i < l->size(); ++i)
+    {
+        int nbr_gid = l->target(i).gid;
+        if (icp.incoming(nbr_gid).size())
+        {
+            fmt::print(stderr, "3: gid={}\n", my_gid);
+            icp.dequeue(nbr_gid, b->count);
+            b->count++;
+            fmt::print(stderr, "4: gid={} count={}\n", my_gid, b->count);
+            icp.enqueue(l->target(i), b->count);
+            fmt::print(stderr, "5: gid={} count={}\n", my_gid, b->count);
+        }
+    }
+
+#endif
 
     // flip a coin to decide whether to be done
     int done = rand() % 2;

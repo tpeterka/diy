@@ -62,7 +62,11 @@ namespace diy
             { return EnqueueIterator<T>(this, x, save); }
 
         IncomingQueues*     incoming() const                                { return incoming_; }
-        MemoryBuffer&       incoming(int from) const                        { return (*incoming_)[from]; }
+        MemoryBuffer&       incoming(int from) const
+            {
+                fmt::print(stderr, "3.5: from={} position={}\n", from, incoming(from).position);
+                return (*incoming_)[from];
+            }
         inline void         incoming(std::vector<int>& v) const;            // fill v with every gid from which we have a message
 
         OutgoingQueues*     outgoing() const                                { return outgoing_; }
