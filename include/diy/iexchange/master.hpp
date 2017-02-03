@@ -1328,9 +1328,17 @@ send_outgoing(ToSendList& to_send,
         OutgoingQueues& outgoing = outgoing_[from].queues;
         for (OutgoingQueues::iterator it = outgoing.begin(); it != outgoing.end(); ++it)
         {
+
             BlockID to_proc = it->first;
             int     to      = to_proc.gid;
             int     proc    = to_proc.proc;
+
+            // skip empty queues
+            if (!outgoing_[from].queues[to_proc].size())
+            {
+                log->debug("Skipping empty queue: {} <- {}", to, from);
+                continue;
+            }
 
             log->debug("Processing queue:      {} <- {} of size {}",
                        to, from, outgoing_[from].queues[to_proc].size());
