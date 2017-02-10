@@ -69,23 +69,24 @@ bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
     size_t tot_q_size;
     while (1)
     {
-        tot_q_size = 0;
+        bool idle = true;
         for (size_t i = 0; i < l->size(); ++i)
         {
             int nbr_gid = l->target(i).gid;
-            tot_q_size += icp.incoming(nbr_gid).size();
-            if (icp.incoming(nbr_gid).size())
+            if (icp.incoming(nbr_gid))
             {
                 icp.dequeue(nbr_gid, b->count);
-                icp.incoming(nbr_gid).clear(); // TODO: should the user or decaf clear?
                 b->count++;
                 icp.enqueue(l->target(i), b->count);
+                idle = false;
             }
         }
 
-        if (!tot_q_size)
+        if (idle)
             break;
     }
+
+    icp.incoming()->clear();                       // TODO: should the user or decaf clear?
 
     // flip a coin to decide whether to be done
     int done = rand() % 2;
