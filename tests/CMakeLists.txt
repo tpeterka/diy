@@ -1,5 +1,3 @@
-add_subdirectory            (scripts)
-
 include_directories         (${CMAKE_SOURCE_DIR}/examples)          # needed for opts.h
 include_directories         (${CMAKE_SOURCE_DIR}/examples/reduce)   # needed for swap-reduce-test
 
@@ -40,18 +38,3 @@ add_test                    (swap-reduce-test-k4                scripts/swap-red
 add_test                    (merge-swap-reduce-test             scripts/merge-swap-reduce.sh ${MPIEXEC})
 
 add_test                    (simple-test                        scripts/simple.sh ${MPIEXEC})
-
-install                     (TARGETS
-                            kd-tree-test
-                            decomposer-test
-                            swap-reduce-test
-                            merge-swap-reduce-test
-                            io-test
-                            simple-test
-                            DESTINATION
-                            ${CMAKE_INSTALL_PREFIX}/tests/
-                            PERMISSIONS
-                            OWNER_READ OWNER_WRITE OWNER_EXECUTE
-                            GROUP_READ GROUP_WRITE GROUP_EXECUTE
-                            WORLD_READ WORLD_WRITE WORLD_EXECUTE)
-
