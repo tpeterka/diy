@@ -1,8 +1,8 @@
 #include <vector>
 #include <iostream>
 
-#include <diy/mpi.hpp>
-#include <diy/iexchange/master.hpp>
+#include <diy/rexchange/mpi.hpp>
+#include <diy/rexchange/master.hpp>
 #include <diy/assigner.hpp>
 #include <diy/serialization.hpp>
 
@@ -20,21 +20,17 @@ void  save_block(const void* b,
 void  load_block(void* b,
                  diy::BinaryBuffer& bb)   { diy::load(bb, *static_cast<Block*>(b)); }
 
-// debug: test enqueue with original synchronous exchange
+// enqueue data inside the link
 void enq(Block* b, const diy::Master::ProxyWithLink& cp)
 {
     diy::Link* l = cp.link();
 
-    // start with every block enqueueing its count the first time
-    if (!b->count)
-    {
-        for (size_t i = 0; i < l->size(); ++i)
-            cp.enqueue(l->target(i), b->count);
-        b->count++;
-    }
+    for (size_t i = 0; i < l->size(); ++i)
+        cp.enqueue(l->target(i), b->count);
+    b->count++;
 }
 
-// debug: test dequeue with original synchronous exchange
+// dequeue data inside the link
 void deq(Block* b, const diy::Master::ProxyWithLink& cp)
 {
     diy::Link* l = cp.link();
@@ -45,58 +41,43 @@ void deq(Block* b, const diy::Master::ProxyWithLink& cp)
         if (cp.incoming(gid).size())
         {
             cp.dequeue(cp.link()->target(i).gid, b->count);
+            fmt::print(stderr, "Dequeue: gid {} received value {} from link gid {}\n",
+                    cp.gid(), b->count, l->target(i).gid);
             b->count++;
-            cp.enqueue(cp.link()->target(i), b->count);
         }
     }
 }
 
-// callback for asynchronous iexchange
-bool foo(Block* b, const diy::Master::IProxyWithLink& icp)
+// enqueue remote data
+// there is still a link, but you can send to any BlockID = (gid, proc)
+void remote_enq(
+        Block*                              b,
+        const diy::Master::ProxyWithLink&   cp,
+        const diy::Assigner&                assigner)
 {
-    diy::Link* l = icp.link();
-    int my_gid   = icp.gid();
+    // as a test, send my gid to block 2 gids away (in a ring), which is outside the link
+    // (the link has only adjacent block gids)
+    int my_gid              = cp.gid();
+    int dest_gid            = (my_gid + 2) % assigner.nblocks();
+    int dest_proc           = assigner.rank(dest_gid);
+    diy::BlockID dest_block = {dest_gid, dest_proc};
+    cp.enqueue(dest_block, my_gid);
+}
 
-    // start with every block enqueueing its count the first time
-    if (!b->count)
-    {
-        for (size_t i = 0; i < l->size(); ++i)
-            icp.enqueue(l->target(i), b->count);
-        b->count++;
-    }
-
-    // then dequeue/enqueue as long as there is something to do
-    size_t tot_q_size;
-    while (1)
-    {
-        bool idle = true;
-        for (size_t i = 0; i < l->size(); ++i)
+// dequeue remote data
+// there is still a link, but rexchange exchanged messages from any block
+void remote_deq(Block* b, const diy::Master::ProxyWithLink& cp)
+{
+    std::vector<int> incoming_gids;
+    cp.incoming(incoming_gids);
+    for (size_t i = 0; i < incoming_gids.size(); i++)
+        if (cp.incoming(incoming_gids[i]).size())
         {
-            int nbr_gid = l->target(i).gid;
-            if (icp.incoming(nbr_gid))
-            {
-                icp.dequeue(nbr_gid, b->count);
-                b->count++;
-                icp.enqueue(l->target(i), b->count);
-                idle = false;
-            }
+            int recvd_data;
+            cp.dequeue(incoming_gids[i], recvd_data);
+            fmt::print(stderr, "Remote dequeue: gid {} received value {} from gid {}\n",
+                    cp.gid(), recvd_data, incoming_gids[i]);
         }
-
-        if (idle)
-            break;
-    }
-
-    icp.incoming()->clear();                       // TODO: should the user or diy clear?
-
-    // flip a coin to decide whether to be done
-    int done = rand() % 2;
-    // icp.collectives()->clear();
-    // icp.all_reduce(done, std::plus<int>());
-
-    fmt::print(stderr, "returning: gid={} count={} done={}\n", my_gid, b->count, done);
-
-    // return (tot_q_size ? false : true);
-    return (true);                           // TODO: hard code all done
 }
 
 int main(int argc, char* argv[])
@@ -105,9 +86,7 @@ int main(int argc, char* argv[])
 
     diy::mpi::environment     env(argc, argv);
     diy::mpi::communicator    world;
-
-    int                       nblocks = 4 * world.size();
-
+    int                       nblocks = 4 * world.size();       // 4 blocks per MPI rank
     diy::FileStorage          storage("./DIY.XXXXXX");
 
     diy::Master               master(world,
@@ -123,7 +102,7 @@ int main(int argc, char* argv[])
 
     diy::RoundRobinAssigner   assigner(world.size(), nblocks);
 
-    // this example creates a linear chain of blocks
+    // this example creates a linear chain of blocks with links between adjacent blocks
     std::vector<int> gids;                     // global ids of local blocks
     assigner.local_gids(world.rank(), gids);   // get the gids of local blocks
     for (size_t i = 0; i < gids.size(); ++i)   // for the local blocks in this processor
@@ -132,13 +111,13 @@ int main(int argc, char* argv[])
 
         diy::Link*   link = new diy::Link;   // link is this block's neighborhood
         diy::BlockID neighbor;               // one neighbor in the neighborhood
-        if (gid < nblocks - 1)               // all but the last block in the global domain
+        if (gid < nblocks - 1)               // RH neighbors for all but the last block in the global domain
         {
             neighbor.gid  = gid + 1;                     // gid of the neighbor block
             neighbor.proc = assigner.rank(neighbor.gid); // process of the neighbor block
             link->add_neighbor(neighbor);                // add the neighbor block to the link
         }
-        if (gid > 0)                         // all but the first block in the global domain
+        if (gid > 0)                         // LH neighbors for all but the first block in the global domain
         {
             neighbor.gid  = gid - 1;
             neighbor.proc = assigner.rank(neighbor.gid);
@@ -148,15 +127,20 @@ int main(int argc, char* argv[])
         master.add(gid, new Block, link);    // add the current local block to the master
     }
 
-#if 0
-    // test synchronous version
-    master.foreach(&enq);
-    master.exchange();
-    master.foreach(&deq);
-#else
-    // dequeue, enqueue, exchange all in one nonblocking routine
-    master.iexchange(&foo);
-#endif
+    int num_iters = 2;
+    for (int i = 0; i < num_iters; i++)
+    {
+        // exchange some data inside the links
+        master.foreach(&enq);
+        master.exchange();
+        master.foreach(&deq);
+
+        // (remote) exchange some data outside the links
+        master.foreach([&](Block* b, const diy::Master::ProxyWithLink& cp)
+                { remote_enq(b, cp, assigner); });
+        master.rexchange();
+        master.foreach(&remote_deq);
+    }
 
     if (world.rank() == 0)
         fmt::print(stderr,
